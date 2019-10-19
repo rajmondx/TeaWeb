@@ -44,97 +44,30 @@ namespace transfer {
         overwrite: boolean;
     }
 
+    export interface DownloadTransfer {
+        get_key() : DownloadKey;
+
+        request_file() : Promise<Response>;
+    }
+    
+    export interface UploadTransfer {
+        get_key(): UploadKey;
+
+        put_data(data: BlobPart | File) : Promise<void>;
+    }
+
     export type DownloadKey = TransferKey;
     export type UploadKey = TransferKey;
-}
 
-class StreamedFileDownload {
-    readonly transfer_key: transfer.DownloadKey;
-    currentSize: number = 0;
-
-    on_start: () => void = () => {};
-    on_complete: () => void = () => {};
-    on_fail: (reason: string) => void = (_) => {};
-    on_data: (data: Uint8Array) => void = (_) => {};
-
-    private _handle: FileManager;
-    private _promiseCallback: (value: StreamedFileDownload) => void;
-    private _socket: WebSocket;
-    private _active: boolean;
-    private _succeed: boolean;
-    private _parseActive: boolean;
-
-    constructor(key: transfer.DownloadKey) {
-        this.transfer_key = key;
+    export function spawn_download_transfer(key: DownloadKey) : DownloadTransfer {
+        return new RequestFileDownload(key);
     }
-
-    start() {
-        if(!this.transfer_key) {
-            this.on_fail("Missing data!");
-            return;
-        }
-
-        console.debug(tr("Create new file download to %s:%s (Key: %s, Expect %d bytes)"), this.transfer_key.peer.hosts[0], this.transfer_key.peer.port, this.transfer_key.key, this.transfer_key.total_size);
-        this._active = true;
-        this._socket = new WebSocket("wss://" + this.transfer_key.peer.hosts[0] + ":" + this.transfer_key.peer.port);
-        this._socket.onopen = this.onOpen.bind(this);
-        this._socket.onclose = this.onClose.bind(this);
-        this._socket.onmessage = this.onMessage.bind(this);
-        this._socket.onerror = this.onError.bind(this);
-    }
-
-    private onOpen() {
-        if(!this._active) return;
-
-        this._socket.send(this.transfer_key.key);
-        this.on_start();
-    }
-
-    private onMessage(data: MessageEvent) {
-        if(!this._active) {
-            console.error(tr("Got data, but socket closed?"));
-            return;
-        }
-        this._parseActive = true;
-
-        let fileReader = new FileReader();
-        fileReader.onload = (event: any) => {
-            this.onBinaryData(new Uint8Array(event.target.result));
-            //if(this._socket.readyState != WebSocket.OPEN && !this._succeed) this.on_fail("unexpected close");
-            this._parseActive = false;
-        };
-        fileReader.readAsArrayBuffer(data.data);
-    }
-
-    private onBinaryData(data: Uint8Array) {
-        this.currentSize += data.length;
-        this.on_data(data);
-        if(this.currentSize == this.transfer_key.total_size) {
-            this._succeed = true;
-            this.on_complete();
-            this.disconnect();
-        }
-    }
-
-    private onError() {
-        if(!this._active) return;
-        this.on_fail(tr("an error occurent"));
-        this.disconnect();
-    }
-
-    private onClose() {
-        if(!this._active) return;
-
-        if(!this._parseActive) this.on_fail(tr("unexpected close (remote closed)"));
-        this.disconnect();
-    }
-
-    private disconnect(){
-        this._active = false;
-        //this._socket.close();
+    export function spawn_upload_transfer(key: UploadKey) : UploadTransfer {
+        return new RequestFileUpload(key);
     }
 }
-class RequestFileDownload {
+
+class RequestFileDownload implements transfer.DownloadTransfer {
     readonly transfer_key: transfer.DownloadKey;
 
     constructor(key: transfer.DownloadKey) {
@@ -145,13 +78,6 @@ class RequestFileDownload {
         return await this.try_fetch("https://" + this.transfer_key.peer.hosts[0] + ":" + this.transfer_key.peer.port);
     }
 
-    /*
-			response.setHeader("Access-Control-Allow-Methods", {"GET, POST"});
-			response.setHeader("Access-Control-Allow-Origin", {"*"});
-			response.setHeader("Access-Control-Allow-Headers", {"*"});
-			response.setHeader("Access-Control-Max-Age", {"86400"});
-			response.setHeader("Access-Control-Expose-Headers", {"X-media-bytes"});
-     */
     private async try_fetch(url: string) : Promise<Response> {
         const response = await fetch(url, {
             method: 'GET',
@@ -164,19 +90,29 @@ class RequestFileDownload {
                 'Access-Control-Expose-Headers': '*'
             }
         });
-        if(!response.ok)
+        if(!response.ok) {
+            debugger;
             throw (response.type == 'opaque' || response.type == 'opaqueredirect' ? "invalid cross origin flag! May target isn't a TeaSpeak server?" : response.statusText || "response is not ok");
+        }
         return response;
+    }
+
+    get_key(): transfer.DownloadKey {
+        return this.transfer_key;
     }
 }
 
-class RequestFileUpload {
+class RequestFileUpload implements transfer.UploadTransfer {
     readonly transfer_key: transfer.UploadKey;
     constructor(key: transfer.DownloadKey) {
         this.transfer_key = key;
     }
 
-    async put_data(data: BufferSource | File) {
+    get_key(): transfer.UploadKey {
+        return this.transfer_key;
+    }
+
+    async put_data(data: BlobPart | File) : Promise<void> {
         const form_data = new FormData();
 
         if(data instanceof File) {
@@ -184,6 +120,10 @@ class RequestFileUpload {
                 throw "invalid size";
 
             form_data.append("file", data);
+        } else if(typeof(data) === "string") {
+            if(data.length != this.transfer_key.total_size)
+                throw "invalid size";
+            form_data.append("file", new Blob([data], { type: "application/octet-stream" }));
         } else {
             const buffer = <BufferSource>data;
             if(buffer.byteLength != this.transfer_key.total_size)
@@ -195,7 +135,7 @@ class RequestFileUpload {
         await this.try_put(form_data, "https://" + this.transfer_key.peer.hosts[0] + ":" + this.transfer_key.peer.port);
     }
 
-    async try_put(data: FormData, url: string) : Promise<void> {
+    private async try_put(data: FormData, url: string) : Promise<void> {
         const response = await fetch(url, {
             method: 'POST',
             cache: "no-cache",
@@ -221,7 +161,7 @@ class FileManager extends connection.AbstractCommandHandler {
     private pending_download_requests: transfer.DownloadKey[] = [];
     private pending_upload_requests: transfer.UploadKey[] = [];
 
-    private transfer_counter : number = 0;
+    private transfer_counter : number = 1;
 
     constructor(client: ConnectionHandler) {
         super(client.serverConnection);
@@ -231,6 +171,24 @@ class FileManager extends connection.AbstractCommandHandler {
         this.avatars = new AvatarManager(this);
 
         this.connection.command_handler_boss().register_handler(this);
+    }
+
+    destroy() {
+        if(this.connection) {
+            const hboss = this.connection.command_handler_boss();
+            if(hboss)
+                hboss.unregister_handler(this);
+        }
+
+        this.listRequests = undefined;
+        this.pending_download_requests = undefined;
+        this.pending_upload_requests = undefined;
+
+        this.icons && this.icons.destroy();
+        this.icons = undefined;
+
+        this.avatars && this.avatars.destroy();
+        this.avatars = undefined;
     }
 
     handle_command(command: connection.ServerCommand): boolean {
@@ -287,7 +245,7 @@ class FileManager extends connection.AbstractCommandHandler {
         }
 
         if(!entry) {
-            console.error(tr("Invalid file list entry. Path: %s"), json[0]["path"]);
+            log.error(LogCategory.CLIENT, tr("Invalid file list entry. Path: %s"), json[0]["path"]);
             return;
         }
         for(let e of (json as Array<FileEntry>)) {
@@ -310,7 +268,7 @@ class FileManager extends connection.AbstractCommandHandler {
         }
 
         if(!entry) {
-            console.error(tr("Invalid file list entry finish. Path: "), json[0]["path"]);
+            log.error(LogCategory.CLIENT, tr("Invalid file list entry finish. Path: "), json[0]["path"]);
             return;
         }
         entry.callback(entry.entries);
@@ -333,8 +291,10 @@ class FileManager extends connection.AbstractCommandHandler {
                 "name": file,
                 "cid": (channel ? channel.channelId : "0"),
                 "cpw": (password ? password : ""),
-                "clientftfid": transfer_data.client_transfer_id
-            }).catch(reason => {
+                "clientftfid": transfer_data.client_transfer_id,
+                "seekpos": 0,
+                "proto": 1
+            }, {process_result: false}).catch(reason => {
                 this.pending_download_requests.remove(transfer_data);
                 reject(reason);
             })
@@ -360,7 +320,8 @@ class FileManager extends connection.AbstractCommandHandler {
                 "clientftfid": transfer_data.client_transfer_id,
                 "size": options.size,
                 "overwrite": options.overwrite,
-                "resume": false
+                "resume": false,
+                "proto": 1
             }).catch(reason => {
                 this.pending_upload_requests.remove(transfer_data);
                 reject(reason);
@@ -371,27 +332,28 @@ class FileManager extends connection.AbstractCommandHandler {
     private notifyStartDownload(json) {
         json = json[0];
 
+        let clientftfid = parseInt(json["clientftfid"]);
         let transfer: transfer.DownloadKey;
         for(let e of this.pending_download_requests)
-            if(e.client_transfer_id == json["clientftfid"]) {
+            if(e.client_transfer_id == clientftfid) {
                 transfer = e;
                 break;
             }
 
-        transfer.server_transfer_id = json["serverftfid"];
+        transfer.server_transfer_id = parseInt(json["serverftfid"]);
         transfer.key = json["ftkey"];
         transfer.total_size = json["size"];
 
         transfer.peer = {
             hosts: (json["ip"] || "").split(","),
-            port: json["port"]
+            port: parseInt(json["port"])
         };
 
         if(transfer.peer.hosts.length == 0)
             transfer.peer.hosts.push("0.0.0.0");
 
         if(transfer.peer.hosts[0].length == 0 || transfer.peer.hosts[0] == '0.0.0.0')
-            transfer.peer.hosts[0] = this.handle.serverConnection._remote_address.host;
+            transfer.peer.hosts[0] = this.handle.serverConnection.remote_address().host;
 
         (transfer["_callback"] as (val: transfer.DownloadKey) => void)(transfer);
         this.pending_download_requests.remove(transfer);
@@ -401,28 +363,51 @@ class FileManager extends connection.AbstractCommandHandler {
         json = json[0];
 
         let transfer: transfer.UploadKey;
+        let clientftfid = parseInt(json["clientftfid"]);
         for(let e of this.pending_upload_requests)
-            if(e.client_transfer_id == json["clientftfid"]) {
+            if(e.client_transfer_id == clientftfid) {
                 transfer = e;
                 break;
             }
 
-        transfer.server_transfer_id = json["serverftfid"];
+        transfer.server_transfer_id = parseInt(json["serverftfid"]);
         transfer.key = json["ftkey"];
 
         transfer.peer = {
             hosts: (json["ip"] || "").split(","),
-            port: json["port"]
+            port: parseInt(json["port"])
         };
 
         if(transfer.peer.hosts.length == 0)
             transfer.peer.hosts.push("0.0.0.0");
 
         if(transfer.peer.hosts[0].length == 0 || transfer.peer.hosts[0] == '0.0.0.0')
-            transfer.peer.hosts[0] = this.handle.serverConnection._remote_address.host;
+            transfer.peer.hosts[0] = this.handle.serverConnection.remote_address().host;
 
         (transfer["_callback"] as (val: transfer.UploadKey) => void)(transfer);
         this.pending_upload_requests.remove(transfer);
+    }
+
+    /** File management **/
+    async delete_file(props: {
+        name: string,
+        path?: string;
+        cid?: number;
+        cpw?: string;
+    }) : Promise<void> {
+        if(!props.name)
+            throw "invalid name!";
+
+        try {
+            await this.handle.serverConnection.send_command("ftdeletefile", {
+                cid: props.cid || 0,
+                cpw: props.cpw,
+                path: props.path || "",
+                name: props.name
+            })
+        } catch(error) {
+            throw error;
+        }
     }
 }
 
@@ -457,8 +442,19 @@ function media_image_type(type: ImageType, file?: boolean) {
     }
 }
 
-function image_type(base64: string) {
-    const bin = atob(base64);
+function image_type(encoded_data: string | ArrayBuffer, base64_encoded?: boolean) {
+    const ab2str10 = () => {
+        const buf = new Uint8Array(encoded_data as ArrayBuffer);
+        if(buf.byteLength < 10)
+            return "";
+
+        let result = "";
+        for(let index = 0; index < 10; index++)
+            result += String.fromCharCode(buf[index]);
+        return result;
+    };
+
+    const bin = typeof(encoded_data) === "string" ? ((typeof(base64_encoded) === "undefined" || base64_encoded) ? atob(encoded_data) : encoded_data) : ab2str10();
     if(bin.length < 10) return ImageType.UNKNOWN;
 
     if(bin[0] == String.fromCharCode(66) && bin[1] == String.fromCharCode(77)) {
@@ -487,6 +483,22 @@ class CacheManager {
 
     setupped() : boolean { return !!this._cache_category; }
 
+    async reset() {
+        if(!window.caches)
+            return;
+
+        try {
+            await caches.delete(this.cache_name);
+        } catch(error) {
+            throw "Failed to delete cache: " + error;
+        }
+        try {
+            await this.setup();
+        } catch(error) {
+            throw "Failed to reinitialize cache!";
+        }
+    }
+
     async setup() {
         if(!window.caches)
             throw "Missing caches!";
@@ -501,8 +513,7 @@ class CacheManager {
     async resolve_cached(key: string, max_age?: number) : Promise<Response | undefined> {
         max_age = typeof(max_age) === "number" ? max_age : -1;
 
-        const request = new Request("https://_local_cache/cache_request_" + key);
-        const cached_response = await this._cache_category.match(request);
+        const cached_response = await this._cache_category.match("https://_local_cache/cache_request_" + key);
         if(!cached_response)
             return undefined;
 
@@ -511,8 +522,6 @@ class CacheManager {
     }
 
     async put_cache(key: string, value: Response, type?: string, headers?: {[key: string]:string}) {
-        const request = new Request("https://_local_cache/cache_request_" + key);
-
         const new_headers = new Headers();
         for(const key of value.headers.keys())
             new_headers.set(key, value.headers.get(key));
@@ -521,14 +530,25 @@ class CacheManager {
         for(const key of Object.keys(headers || {}))
             new_headers.set(key, headers[key]);
 
-        await this._cache_category.put(request, new Response(value.body, {
+        await this._cache_category.put("https://_local_cache/cache_request_" + key, new Response(value.body, {
             headers: new_headers
         }));
+    }
+
+    async delete(key: string) {
+        const flag = await this._cache_category.delete("https://_local_cache/cache_request_" + key, {
+            ignoreVary: true,
+            ignoreMethod: true,
+            ignoreSearch: true
+        });
+        if(!flag) {
+            console.warn(tr("Failed to delete key %s from cache!"), flag);
+        }
     }
 }
 
 class IconManager {
-    private static cache: CacheManager;
+    private static cache: CacheManager = new CacheManager("icons");
 
     handle: FileManager;
     private _id_urls: {[id:number]:string} = {};
@@ -536,9 +556,34 @@ class IconManager {
 
     constructor(handle: FileManager) {
         this.handle = handle;
+    }
 
-        if(!IconManager.cache)
-            IconManager.cache = new CacheManager("icons");
+    destroy() {
+        if(URL.revokeObjectURL) {
+            for(const id of Object.keys(this._id_urls))
+                URL.revokeObjectURL(this._id_urls[id]);
+        }
+        this._id_urls = undefined;
+        this._loading_promises = undefined;
+    }
+
+    async clear_cache() {
+        await IconManager.cache.reset();
+        if(URL.revokeObjectURL) {
+            for(const id of Object.keys(this._id_urls))
+                URL.revokeObjectURL(this._id_urls[id]);
+        }
+        this._id_urls = {};
+        this._loading_promises = {};
+    }
+
+    async delete_icon(id: number) : Promise<void> {
+        if(id <= 1000)
+            throw "invalid id!";
+
+        await this.handle.delete_file({
+            name: '/icon_' + id
+        });
     }
 
     iconList() : Promise<FileEntry[]> {
@@ -549,7 +594,7 @@ class IconManager {
         return this.handle.download_file("", "/icon_" + id);
     }
 
-    private async _response_url(response: Response) {
+    private static async _response_url(response: Response) {
         if(!response.headers.has('X-media-bytes'))
             throw "missing media bytes";
 
@@ -574,12 +619,48 @@ class IconManager {
             await IconManager.cache.setup();
 
         const response = await IconManager.cache.resolve_cached('icon_' + id); //TODO age!
-        if(response)
+        if(response) {
+            const url = await IconManager._response_url(response);
+            if(this._id_urls[id])
+                URL.revokeObjectURL(this._id_urls[id]);
             return {
                 id: id,
-                url: (this._id_urls[id] = await this._response_url(response))
+                url: url
             };
+        }
         return undefined;
+    }
+
+    private static _static_id_url: {[icon: number]:string} = {};
+    private static _static_cached_promise: {[icon: number]:Promise<Icon>} = {};
+    static load_cached_icon(id: number, ignore_age?: boolean) : Promise<Icon> | Icon {
+        if(this._static_id_url[id]) {
+            return {
+                id: id,
+                url: this._static_id_url[id]
+            };
+        }
+
+        if(this._static_cached_promise[id])
+            return this._static_cached_promise[id];
+
+        return (this._static_cached_promise[id] = (async () => {
+            if(!this.cache.setupped())
+                await this.cache.setup();
+
+            const response = await this.cache.resolve_cached('icon_' + id); //TODO age!
+            if(response) {
+                const url = await this._response_url(response);
+                if(this._static_id_url[id])
+                    URL.revokeObjectURL(this._static_id_url[id]);
+                this._static_id_url[id] = url;
+
+                return {
+                    id: id,
+                    url: url
+                };
+            }
+        })());
     }
 
     private async _load_icon(id: number) : Promise<Icon> {
@@ -588,16 +669,16 @@ class IconManager {
             try {
                 download_key = await this.create_icon_download(id);
             } catch(error) {
-                console.error(tr("Could not request download for icon %d: %o"), id, error);
+                log.error(LogCategory.CLIENT, tr("Could not request download for icon %d: %o"), id, error);
                 throw "Failed to request icon";
             }
 
-            const downloader = new RequestFileDownload(download_key);
+            const downloader = transfer.spawn_download_transfer(download_key);
             let response: Response;
             try {
                 response = await downloader.request_file();
             } catch(error) {
-                console.error(tr("Could not download icon %d: %o"), id, error);
+                log.error(LogCategory.CLIENT, tr("Could not download icon %d: %o"), id, error);
                 throw "failed to download icon";
             }
 
@@ -605,7 +686,10 @@ class IconManager {
             const media = media_image_type(type);
 
             await IconManager.cache.put_cache('icon_' + id, response.clone(), "image/" + media);
-            const url = (this._id_urls[id] = await this._response_url(response.clone()));
+            const url = await IconManager._response_url(response.clone());
+            if(this._id_urls[id])
+                URL.revokeObjectURL(this._id_urls[id]);
+            this._id_urls[id] = url;
 
             this._loading_promises[id] = undefined;
             return {
@@ -620,8 +704,81 @@ class IconManager {
         }
     }
 
-    loadIcon(id: number) : Promise<Icon> {
+    download_icon(id: number) : Promise<Icon> {
         return this._loading_promises[id] || (this._loading_promises[id] = this._load_icon(id));
+    }
+
+    async resolve_icon(id: number) : Promise<Icon> {
+        id = id >>> 0;
+        try {
+            const result = await this.resolved_cached(id);
+            if(result)
+                return result;
+            throw "";
+        } catch(error) { }
+
+        try {
+            const result =  await this.download_icon(id);
+            if(result)
+                return result;
+            throw "load result is empty";
+        } catch(error) {
+            log.error(LogCategory.CLIENT, tr("Icon download failed of icon %d: %o"), id, error);
+        }
+
+        throw "icon not found";
+    }
+
+    static generate_tag(icon: Promise<Icon> | Icon | undefined, options?: {
+        animate?: boolean
+    }) : JQuery<HTMLDivElement> {
+        options = options || {};
+
+        let icon_container = $.spawn("div").addClass("icon-container icon_empty");
+        let icon_load_image = $.spawn("div").addClass("icon_loading");
+
+        const icon_image = $.spawn("img").attr("width", 16).attr("height", 16).attr("alt", "");
+        const _apply = (icon) => {
+            let id = icon ? (icon.id >>> 0) : 0;
+            if (!icon || id == 0) {
+                icon_load_image.remove();
+                icon_load_image = undefined;
+                return;
+            } else if (id < 1000) {
+                icon_load_image.remove();
+                icon_load_image = undefined;
+
+                icon_container.removeClass("icon_empty").addClass("icon_em client-group_" + id);
+                return;
+            }
+
+            icon_image.attr("src", icon.url);
+            icon_container.append(icon_image).removeClass("icon_empty");
+
+            if (typeof (options.animate) !== "boolean" || options.animate) {
+                icon_image.css("opacity", 0);
+
+                icon_load_image.animate({opacity: 0}, 50, function () {
+                    icon_load_image.remove();
+                    icon_image.animate({opacity: 1}, 150);
+                });
+            } else {
+                icon_load_image.remove();
+                icon_load_image = undefined;
+            }
+        };
+        if(icon instanceof Promise) {
+            icon.then(_apply).catch(error => {
+                log.error(LogCategory.CLIENT, tr("Could not load icon. Reason: %s"), error);
+                icon_load_image.removeClass("icon_loading").addClass("icon client-warning").attr("tag", "Could not load icon");
+            });
+        } else {
+            _apply(icon as Icon);
+        }
+
+        if(icon_load_image)
+            icon_load_image.appendTo(icon_container);
+        return icon_container;
     }
 
     generateTag(id: number, options?: {
@@ -629,56 +786,18 @@ class IconManager {
     }) : JQuery<HTMLDivElement> {
         options = options || {};
 
-        if(id == 0)
-            return $.spawn("div").addClass("icon_empty");
+        id = id >>> 0;
+        if(id == 0 || !id)
+            return IconManager.generate_tag({id: id, url: ""}, options);
         else if(id < 1000)
-            return $.spawn("div").addClass("icon client-group_" + id);
+            return IconManager.generate_tag({id: id, url: ""}, options);
 
-
-        const icon_container = $.spawn("div").addClass("icon-container icon_empty");
-        const icon_image = $.spawn("img").attr("width", 16).attr("height", 16).attr("alt", "");
 
         if(this._id_urls[id]) {
-            icon_image.attr("src", this._id_urls[id]).appendTo(icon_container);
-            icon_container.removeClass("icon_empty");
+            return IconManager.generate_tag({id: id, url: this._id_urls[id]}, options);
         } else {
-            const icon_load_image = $.spawn("div").addClass("icon_loading");
-            icon_load_image.appendTo(icon_container);
-
-            (async () => {
-                let icon: Icon;
-                try {
-                    icon = await this.resolved_cached(id);
-                } catch(error) {
-                    console.error(error);
-                }
-
-                if(!icon)
-                    icon = await this.loadIcon(id);
-
-                if(!icon)
-                    throw "failed to download icon";
-
-                icon_image.attr("src", icon.url);
-                icon_container.append(icon_image).removeClass("icon_empty");
-
-                if(typeof(options.animate) !== "boolean" || options.animate) {
-                    icon_image.css("opacity", 0);
-
-                    icon_load_image.animate({opacity: 0}, 50, function () {
-                        icon_load_image.detach();
-                        icon_image.animate({opacity: 1}, 150);
-                    });
-                } else {
-                    icon_load_image.detach();
-                }
-            })().catch(reason => {
-                console.error(tr("Could not load icon %o. Reason: %s"), id, reason);
-                icon_load_image.removeClass("icon_loading").addClass("icon client-warning").attr("tag", "Could not load icon " + id);
-            });
+            return IconManager.generate_tag(this.resolve_icon(id), options);
         }
-
-        return icon_container;
     }
 }
 
@@ -703,6 +822,11 @@ class AvatarManager {
             AvatarManager.cache = new CacheManager("avatars");
     }
 
+    destroy() {
+        this._cached_avatars = undefined;
+        this._loading_promises = undefined;
+    }
+
     private async _response_url(response: Response, type: ImageType) : Promise<string> {
         if(!response.headers.has('X-media-bytes'))
             throw "missing media bytes";
@@ -715,12 +839,12 @@ class AvatarManager {
             return URL.createObjectURL(blob);
     }
 
-    async resolved_cached?(client_avatar_id: string, avatar_id?: string) : Promise<Avatar> {
-        let avatar: Avatar = this._cached_avatars[avatar_id];
+    async resolved_cached?(client_avatar_id: string, avatar_version?: string) : Promise<Avatar> {
+        let avatar: Avatar = this._cached_avatars[avatar_version];
         if(avatar) {
-            if(typeof(avatar_id) !== "string" || avatar.avatar_id == avatar_id)
+            if(typeof(avatar_version) !== "string" || avatar.avatar_id == avatar_version)
                 return avatar;
-            this._cached_avatars[avatar_id] = (avatar = undefined);
+            avatar = undefined;
         }
 
         if(!AvatarManager.cache.setupped())
@@ -730,65 +854,92 @@ class AvatarManager {
         if(!response)
             return undefined;
 
-        let response_avatar_id = response.headers.has("X-avatar-id") ? response.headers.get("X-avatar-id") : undefined;
-        if(typeof(avatar_id) === "string" && response_avatar_id != avatar_id)
+        let response_avatar_version = response.headers.has("X-avatar-version") ? response.headers.get("X-avatar-version") : undefined;
+        if(typeof(avatar_version) === "string" && response_avatar_version != avatar_version)
             return undefined;
 
         const type = image_type(response.headers.get('X-media-bytes'));
         return this._cached_avatars[client_avatar_id] = {
             client_avatar_id: client_avatar_id,
-            avatar_id: avatar_id || response_avatar_id,
+            avatar_id: avatar_version || response_avatar_version,
             url: await this._response_url(response, type),
             type: type
         };
     }
 
     create_avatar_download(client_avatar_id: string) : Promise<transfer.DownloadKey> {
-        console.log(tr("Downloading avatar %s"), client_avatar_id);
+        log.debug(LogCategory.GENERAL, "Requesting download for avatar %s", client_avatar_id);
         return this.handle.download_file("", "/avatar_" + client_avatar_id);
     }
 
-    private async _load_avatar(client_avatar_id: string, avatar_id: string) {
-        let download_key: transfer.DownloadKey;
+    private async _load_avatar(client_avatar_id: string, avatar_version: string) {
         try {
-            download_key = await this.create_avatar_download(client_avatar_id);
-        } catch(error) {
-            console.error(tr("Could not request download for avatar %s: %o"), client_avatar_id, error);
-            throw "Failed to request icon";
+            let download_key: transfer.DownloadKey;
+            try {
+                download_key = await this.create_avatar_download(client_avatar_id);
+            } catch(error) {
+                log.error(LogCategory.GENERAL, tr("Could not request download for avatar %s: %o"), client_avatar_id, error);
+                throw "failed to request avatar download";
+            }
+
+            const downloader = transfer.spawn_download_transfer(download_key);
+            let response: Response;
+            try {
+                response = await downloader.request_file();
+            } catch(error) {
+                log.error(LogCategory.GENERAL, tr("Could not download avatar %s: %o"), client_avatar_id, error);
+                throw "failed to download avatar";
+            }
+
+            const type = image_type(response.headers.get('X-media-bytes'));
+            const media = media_image_type(type);
+
+            await AvatarManager.cache.put_cache('avatar_' + client_avatar_id, response.clone(), "image/" + media, {
+                "X-avatar-version": avatar_version
+            });
+            const url = await this._response_url(response.clone(), type);
+
+            return this._cached_avatars[client_avatar_id] = {
+                client_avatar_id: client_avatar_id,
+                avatar_id: avatar_version,
+                url: url,
+                type: type
+            };
+        } finally {
+            this._loading_promises[client_avatar_id] = undefined;
         }
-
-        const downloader = new RequestFileDownload(download_key);
-        let response: Response;
-        try {
-            response = await downloader.request_file();
-        } catch(error) {
-            console.error(tr("Could not download avatar %s: %o"), client_avatar_id, error);
-            throw "failed to download avatar";
-        }
-
-        const type = image_type(response.headers.get('X-media-bytes'));
-        const media = media_image_type(type);
-
-        await AvatarManager.cache.put_cache('avatar_' + client_avatar_id, response.clone(), "image/" + media, {
-            "X-avatar-id": avatar_id
-        });
-        const url = await this._response_url(response.clone(), type);
-
-        this._loading_promises[client_avatar_id] = undefined;
-        return this._cached_avatars[client_avatar_id] = {
-            client_avatar_id: client_avatar_id,
-            avatar_id: avatar_id,
-            url: url,
-            type: type
-        };
     }
 
-    loadAvatar(client_avatar_id: string, avatar_id: string) : Promise<Avatar> {
-        return this._loading_promises[client_avatar_id] || (this._loading_promises[client_avatar_id] = this._load_avatar(client_avatar_id, avatar_id));
+    /* loads an avatar by the avatar id and optional with the avatar version */
+    load_avatar(client_avatar_id: string, avatar_version: string) : Promise<Avatar> {
+        return this._loading_promises[client_avatar_id] || (this._loading_promises[client_avatar_id] = this._load_avatar(client_avatar_id, avatar_version));
     }
 
     generate_client_tag(client: ClientEntry) : JQuery {
         return this.generate_tag(client.avatarId(), client.properties.client_flag_avatar);
+    }
+
+    update_cache(client_avatar_id: string, avatar_id: string) {
+        const _cached: Avatar = this._cached_avatars[client_avatar_id];
+        if(_cached) {
+            if(_cached.avatar_id === avatar_id)
+                return; /* cache is up2date */
+
+            log.info(LogCategory.GENERAL, tr("Deleting cached avatar for client %s. Cached version: %s; New version: %s"), client_avatar_id, _cached.avatar_id, avatar_id);
+            delete this._cached_avatars[client_avatar_id];
+            AvatarManager.cache.delete("avatar_" + client_avatar_id).catch(error => {
+                log.error(LogCategory.GENERAL, tr("Failed to delete cached avatar for client %o: %o"), client_avatar_id, error);
+            });
+        } else {
+            this.resolved_cached(client_avatar_id).then(avatar => {
+                if(avatar && avatar.avatar_id !== avatar_id) {
+                    /* this time we ensured that its cached */
+                    this.update_cache(client_avatar_id, avatar_id);
+                }
+            }).catch(error => {
+                log.error(LogCategory.GENERAL, tr("Failed to delete cached avatar for client %o (cache lookup failed): %o"), client_avatar_id, error);
+            });
+        }
     }
 
     generate_tag(client_avatar_id: string, avatar_id?: string, options?: {
@@ -801,7 +952,9 @@ class AvatarManager {
         let avatar_image = $.spawn("img").attr("alt", tr("Client avatar"));
 
         let cached_avatar: Avatar = this._cached_avatars[client_avatar_id];
-        if(cached_avatar && cached_avatar.avatar_id == avatar_id) {
+        if(avatar_id === "") {
+            avatar_container.append(this.generate_default_image());
+        } else if(cached_avatar && cached_avatar.avatar_id == avatar_id) {
             avatar_image.attr("src", cached_avatar.url);
             avatar_container.append(avatar_image);
             if(options.callback_image)
@@ -818,11 +971,11 @@ class AvatarManager {
                 try {
                     avatar = await this.resolved_cached(client_avatar_id, avatar_id);
                 } catch(error) {
-                    console.error(error);
+                    log.error(LogCategory.CLIENT, error);
                 }
 
                 if(!avatar)
-                    avatar = await this.loadAvatar(client_avatar_id, avatar_id)
+                    avatar = await this.load_avatar(client_avatar_id, avatar_id);
 
                 if(!avatar)
                     throw "failed to load avatar";
@@ -834,19 +987,124 @@ class AvatarManager {
                 avatar_image.css("opacity", 0);
                 avatar_container.append(avatar_image);
                 loader_image.animate({opacity: 0}, 50, () => {
-                    loader_image.detach();
+                    loader_image.remove();
                     avatar_image.animate({opacity: 1}, 150, () => {
                         if(options.callback_image)
                             options.callback_image(avatar_image);
                     });
                 });
             })().catch(reason => {
-                console.error(tr("Could not load avatar for id %s. Reason: %s"), client_avatar_id, reason);
+                log.error(LogCategory.CLIENT, tr("Could not load avatar for id %s. Reason: %s"), client_avatar_id, reason);
                 //TODO Broken image
                 loader_image.addClass("icon client-warning").attr("tag", tr("Could not load avatar ") + client_avatar_id);
             })
         }
 
         return avatar_container;
+    }
+
+    unique_id_2_avatar_id(unique_id: string) {
+        function str2ab(str) {
+            let buf = new ArrayBuffer(str.length); // 2 bytes for each char
+            let bufView = new Uint8Array(buf);
+            for (let i=0, strLen = str.length; i<strLen; i++) {
+                bufView[i] = str.charCodeAt(i);
+            }
+            return buf;
+        }
+
+        try {
+            let raw = atob(unique_id);
+            let input = hex.encode(str2ab(raw));
+
+            let result: string = "";
+            for(let index = 0; index < input.length; index++) {
+                let c = input.charAt(index);
+                let offset: number = 0;
+                if(c >= '0' && c <= '9')
+                    offset = c.charCodeAt(0) - '0'.charCodeAt(0);
+                else if(c >= 'A' && c <= 'F')
+                    offset = c.charCodeAt(0) - 'A'.charCodeAt(0) + 0x0A;
+                else if(c >= 'a' && c <= 'f')
+                    offset = c.charCodeAt(0) - 'a'.charCodeAt(0) + 0x0A;
+                result += String.fromCharCode('a'.charCodeAt(0) + offset);
+            }
+            return result;
+        } catch (e) { //invalid base 64 (like music bot etc)
+            return undefined;
+        }
+    }
+
+    private generate_default_image() : JQuery {
+        return $.spawn("img").attr("src", "img/style/avatar.png").css({width: '100%', height: '100%'});
+    }
+
+    generate_chat_tag(client: { id?: number; database_id?: number; }, client_unique_id: string, callback_loaded?: (successfully: boolean, error?: any) => any) : JQuery {
+        let client_handle;
+        if(typeof(client.id) == "number")
+            client_handle = this.handle.handle.channelTree.findClient(client.id);
+        if(!client_handle && typeof(client.id) == "number") {
+            client_handle = this.handle.handle.channelTree.find_client_by_dbid(client.database_id);
+        }
+
+        if(client_handle && client_handle.clientUid() !== client_unique_id)
+            client_handle = undefined;
+
+        const container = $.spawn("div").addClass("avatar");
+        if(client_handle && !client_handle.properties.client_flag_avatar)
+            return container.append(this.generate_default_image());
+
+
+        const avatar_id = client_handle ? client_handle.avatarId() : this.unique_id_2_avatar_id(client_unique_id);
+        if(avatar_id) {
+            if(this._cached_avatars[avatar_id]) { /* Test if we're may able to load the client avatar sync without a loading screen */
+                const cache: Avatar = this._cached_avatars[avatar_id];
+                log.debug(LogCategory.GENERAL, tr("Using cached avatar. ID: %o | Version: %o (Cached: %o)"), avatar_id, client_handle ? client_handle.properties.client_flag_avatar : undefined, cache.avatar_id);
+                if(!client_handle || client_handle.properties.client_flag_avatar == cache.avatar_id) {
+                    const image = $.spawn("img").attr("src", cache.url).css({width: '100%', height: '100%'});
+                    return container.append(image);
+                }
+            }
+
+            const image_loading = $.spawn("img").attr("src", "img/loading_image.svg").css({width: '100%', height: '100%'});
+
+            /* lets actually load the avatar */
+            (async () => {
+                let avatar: Avatar;
+                let loaded_image = this.generate_default_image();
+
+                log.debug(LogCategory.GENERAL, tr("Resolving avatar. ID: %o | Version: %o"), avatar_id, client_handle ? client_handle.properties.client_flag_avatar : undefined);
+                try {
+                    //TODO: Cache if avatar load failed and try again in some minutes/may just even consider using the default avatar 'till restart
+                    try {
+                        avatar = await this.resolved_cached(avatar_id, client_handle ? client_handle.properties.client_flag_avatar : undefined);
+                    } catch(error) {
+                        log.error(LogCategory.GENERAL, tr("Failed to use cached avatar: %o"), error);
+                    }
+
+                    if(!avatar)
+                        avatar = await this.load_avatar(avatar_id, client_handle ? client_handle.properties.client_flag_avatar : undefined);
+
+                    if(!avatar)
+                        throw "no avatar present!";
+
+                    loaded_image = $.spawn("img").attr("src", avatar.url).css({width: '100%', height: '100%'});
+                } catch(error) {
+                    throw error;
+                } finally {
+                    container.children().remove();
+                    container.append(loaded_image);
+                }
+            })().then(() => callback_loaded && callback_loaded(true)).catch(error => {
+                log.warn(LogCategory.CLIENT, tr("Failed to load chat avatar for client %s. Error: %o"), client_unique_id, error);
+                callback_loaded && callback_loaded(false, error);
+            });
+
+            image_loading.appendTo(container);
+        } else {
+            this.generate_default_image().appendTo(container);
+        }
+
+        return container;
     }
 }

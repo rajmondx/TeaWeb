@@ -14,6 +14,15 @@ namespace profiles {
             this.id = id;
         }
 
+        connect_username() : string {
+            if(this.default_username && this.default_username !== "Another TeaSpeak user")
+                return this.default_username;
+
+            let selected = this.selected_identity();
+            let name = selected ? selected.fallback_name() : undefined;
+            return name || "Another TeaSpeak user";
+        }
+
         selected_identity(current_type?: identities.IdentitifyType) : identities.Identity {
             if(!current_type)
                 current_type = this.selected_type();
@@ -66,7 +75,7 @@ namespace profiles {
             const identity = this.selected_identity();
             if(!identity || !identity.valid()) return false;
 
-            return this.default_username !== undefined;
+            return true;
         }
     }
 
@@ -107,7 +116,16 @@ namespace profiles {
         available_profiles = [];
 
         const profiles_json = localStorage.getItem("profiles");
-        let profiles_data: ProfilesData = profiles_json ? JSON.parse(profiles_json) : {version: 0} as any;
+        let profiles_data: ProfilesData = (() => {
+            try {
+                return profiles_json ? JSON.parse(profiles_json) : {version: 0} as any;
+            } catch(error) {
+                debugger;
+                console.error(tr("Invalid profile json! Resetting profiles :( (%o)"), profiles_json);
+                createErrorModal(tr("Profile data invalid"), MessageHelper.formatMessage(tr("The profile data is invalid.{:br:}This might cause data loss."))).open();
+                return {version: 0};
+            }
+        })();
 
         if(profiles_data.version === 0) {
             profiles_data = {
@@ -130,12 +148,17 @@ namespace profiles {
             {
                 const profile = create_new_profile("default","default");
                 profile.default_password = "";
-                profile.default_username = "Another TeaSpeak user";
+                profile.default_username = "";
                 profile.profile_name = "Default Profile";
 
                 /* generate default identity */
                 try {
                     const identity = await identities.TeaSpeakIdentity.generate_new();
+                    let active = true;
+                    setTimeout(() => {
+                        active = false;
+                    }, 1000);
+                    await identity.improve_level(8, 1, () => active);
                     profile.set_identity(identities.IdentitifyType.TEAMSPEAK, identity);
                     profile.selected_identity_type = identities.IdentitifyType[identities.IdentitifyType.TEAMSPEAK];
                 } catch(error) {
@@ -146,8 +169,11 @@ namespace profiles {
             { /* forum identity (works only when connected to the forum) */
                 const profile = create_new_profile("TeaSpeak Forum","teaforo");
                 profile.default_password = "";
-                profile.default_username = "Another TeaSpeak user";
+                profile.default_username = "";
                 profile.profile_name = "TeaSpeak Forum profile";
+
+                profile.set_identity(identities.IdentitifyType.TEAFORO, identities.static_forum_identity());
+                profile.selected_identity_type = identities.IdentitifyType[identities.IdentitifyType.TEAFORO];
             }
 
             save();
@@ -157,7 +183,7 @@ namespace profiles {
     export function create_new_profile(name: string, id?: string) : ConnectionProfile {
         const profile = new ConnectionProfile(id || guid());
         profile.profile_name = name;
-        profile.default_username = "Another TeaSpeak user";
+        profile.default_username = "";
         available_profiles.push(profile);
         return profile;
     }

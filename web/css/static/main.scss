@@ -4,9 +4,6 @@ html, body {
     height: 100%;
     width: 100%;
     position: fixed;
-
-    //min-height: 250px;
-    //min-width: 250px;
 }
 
 .app-container {
@@ -14,10 +11,8 @@ html, body {
 	justify-content: stretch;
 	position: absolute;
 
-    right: 10px;
-    left: 10px;
-    bottom: 40px;
-    top: 10px;
+	top: 1.5em!important;
+    bottom: 0;
 
     transition: all .5s linear;
     
@@ -32,7 +27,11 @@ html, body {
 
 $small_device: 650px;
 @media only screen and (max-width: $small_device) {
+	html, body {
+		padding: 0!important;
+	}
+
 	.app-container {
-		bottom: 25px;
+		bottom: 0;
 	}
 }

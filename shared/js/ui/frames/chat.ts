@@ -5,6 +5,7 @@ enum ChatType {
     CLIENT
 }
 
+declare const xbbcode: any;
 namespace MessageHelper {
     export function htmlEscape(message: string) : string[] {
         const div = document.createElement('div');
@@ -57,11 +58,11 @@ namespace MessageHelper {
             let offset = 0;
             if(pattern[found + 1] == ':') {
                 offset++; /* the beginning : */
-                while (pattern[found + 1 + offset] != ':') offset++;
+                while (pattern[found + 1 + offset] != ':' && found + 1 + offset < pattern.length) offset++;
                 const tag = pattern.substr(found + 2, offset - 1);
 
                 offset++; /* the ending : */
-                if(pattern[found + offset + 1] != '}') {
+                if(pattern[found + offset + 1] != '}' && found + 1 + offset < pattern.length) {
                     found++;
                     continue;
                 }
@@ -90,458 +91,260 @@ namespace MessageHelper {
     }
 
     export function bbcode_chat(message: string) : JQuery[] {
-        let result = XBBCODE.process({
-            text: message,
-            escapeHtml: true,
-            addInLineBreaks: false,
-
+        const result = xbbcode.parse(message, {
             /* TODO make this configurable and allow IMG */
             tag_whitelist: [
-                "b",
-                "i",
-                "u",
+                "b", "big",
+                "i", "italic",
+                "u", "underlined",
                 "color",
-                "url"
-            ]
-        });
+                "url",
+                "code",
+                "icode",
+                "i-code",
 
+                "ul", "ol", "list",
+                "li",
+                /* "img" */
+            ] //[img]https://i.ytimg.com/vi/kgeSTkZssPg/maxresdefault.jpg[/img]
+        });
+        /*
         if(result.error) {
             log.error(LogCategory.GENERAL, tr("BBCode parse error: %o"), result.errorQueue);
             return formatElement(message);
         }
+        */
 
-        return result.html.split("\n").map((entry, idx, array) => $.spawn("a").css("display", (idx == 0 ? "inline" : "") + "block").html(entry == "" && idx != 0 ? "&nbsp;" : entry));
-    }
-}
+        let html = result.build_html();
 
-class ChatMessage {
-    date: Date;
-    message: JQuery[];
-    private _html_tag: JQuery<HTMLElement>;
+        if(typeof(window.twemoji) !== "undefined" && settings.static_global(Settings.KEY_CHAT_COLORED_EMOJIES))
+            html = twemoji.parse(html);
 
-    constructor(message: JQuery[]) {
-        this.date = new Date();
-        this.message = message;
-    }
+        const container = $.spawn("div");
+        container[0].innerHTML = DOMPurify.sanitize(html, {
+            ADD_ATTR: [
+                "x-highlight-type",
+                "x-code-type"
+            ]
+        });
 
-    private num(num: number) : string {
-        let str = num.toString();
-        while(str.length < 2) str = '0' + str;
-        return str;
-    }
+        container.find("a")
+            .attr('target', "_blank")
+            .on('contextmenu', event => {
+            if(event.isDefaultPrevented()) return;
+            event.preventDefault();
 
-    get html_tag() {
-        if(this._html_tag) return this._html_tag;
-
-        let tag = $.spawn("div");
-        tag.addClass("message");
-
-        let dateTag = $.spawn("div");
-        dateTag.text("<" + this.num(this.date.getUTCHours()) + ":" + this.num(this.date.getUTCMinutes()) + ":" + this.num(this.date.getUTCSeconds()) + "> ");
-        dateTag.css("margin-right", "4px");
-        dateTag.css("color", "dodgerblue");
-
-        this._html_tag = tag;
-        tag.append(dateTag);
-        this.message.forEach(e => e.appendTo(tag));
-        return tag;
-    }
-}
-
-class ChatEntry {
-    readonly handle: ChatBox;
-    type: ChatType;
-    key: string;
-    history: ChatMessage[];
-
-    owner_unique_id?: string;
-
-    private _name: string;
-    private _html_tag: any;
-
-    private _flag_closeable: boolean = true;
-    private _flag_unread : boolean = false;
-    private _flag_offline: boolean = false;
-
-    onMessageSend: (text: string) => void;
-    onClose: () => boolean = () => true;
-
-    constructor(handle, type : ChatType, key) {
-        this.handle = handle;
-        this.type = type;
-        this.key = key;
-        this._name = key;
-        this.history = [];
-    }
-
-    appendError(message: string, ...args) {
-        let entries = MessageHelper.formatMessage(message, ...args);
-        entries.forEach(e => e.css("color", "red"));
-        this.pushChatMessage(new ChatMessage(entries));
-    }
-
-    appendMessage(message : string, fmt: boolean = true, ...args) {
-       this.pushChatMessage(new ChatMessage(MessageHelper.formatMessage(message, ...args)));
-    }
-
-    private pushChatMessage(entry: ChatMessage) {
-        this.history.push(entry);
-        while(this.history.length > 100) {
-            let elm = this.history.pop_front();
-            elm.html_tag.animate({opacity: 0}, 200, function () {
-                $(this).detach();
-            });
-        }
-        if(this.handle.activeChat === this) {
-            let box = $(this.handle.htmlTag).find(".messages");
-            let mbox = $(this.handle.htmlTag).find(".message_box");
-            let bottom : boolean = box.scrollTop() + box.height() + 1 >= mbox.height();
-            mbox.append(entry.html_tag);
-            entry.html_tag.css("opacity", "0").animate({opacity: 1}, 100);
-            if(bottom) box.scrollTop(mbox.height());
-        } else {
-            this.flag_unread = true;
-        }
-    }
-
-    displayHistory() {
-        this.flag_unread = false;
-        let box = this.handle.htmlTag.find(".messages");
-        let mbox = box.find(".message_box").detach(); /* detach the message box to improve performance */
-        mbox.empty();
-
-        for(let e of this.history) {
-            mbox.append(e.html_tag);
-            /* TODO Is this really totally useless?
-                    Because its at least a performance bottleneck because is(...) recalculates the page style
-                if(e.htmlTag.is(":hidden"))
-                    e.htmlTag.show();
-             */
-        }
-
-        mbox.appendTo(box);
-        box.scrollTop(mbox.height());
-    }
-
-    get html_tag() {
-        if(this._html_tag)
-            return this._html_tag;
-
-        let tag = $.spawn("div");
-        tag.addClass("chat");
-        if(this._flag_unread)
-            tag.addClass('unread');
-        if(this._flag_offline)
-            tag.addClass('offline');
-        if(this._flag_closeable)
-            tag.addClass('closeable');
-
-        tag.append($.spawn("div").addClass("chat-type icon " + this.chat_icon()));
-        tag.append($.spawn("a").addClass("name").text(this._name));
-
-        let tag_close = $.spawn("div");
-        tag_close.addClass("btn_close icon client-tab_close_button");
-        if(!this._flag_closeable) tag_close.hide();
-        tag.append(tag_close);
-
-        tag.click(() => { this.handle.activeChat = this; });
-        tag.on("contextmenu", (e) => {
-            e.preventDefault();
-
-            let actions: ContextMenuEntry[] = [];
-            actions.push({
-                type: MenuEntryType.ENTRY,
-                icon: "",
-                name: tr("Clear"),
+            const url = $(event.target).attr("href");
+            contextmenu.spawn_context_menu(event.pageX, event.pageY, {
                 callback: () => {
-                    this.history = [];
-                    this.displayHistory();
-                }
-            });
-            if(this.flag_closeable) {
-                actions.push({
-                    type: MenuEntryType.ENTRY,
-                    icon: "client-tab_close_button",
-                    name: tr("Close"),
-                    callback: () => this.handle.deleteChat(this)
-                });
-            }
-
-            actions.push({
-                type: MenuEntryType.ENTRY,
-                icon: "client-tab_close_button",
-                name: tr("Close all private tabs"),
-                callback: () => {
-                    //TODO Implement this?
+                    const win = window.open(url, '_blank');
+                    win.focus();
                 },
-                visible: false
+                name: tr("Open URL"),
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-browse-addon-online"
+            }, {
+                callback: () => {
+                    //TODO
+                },
+                name: tr("Open URL in Browser"),
+                type: contextmenu.MenuEntryType.ENTRY,
+                visible: !app.is_web() && false // Currently not possible
+            }, contextmenu.Entry.HR(), {
+                callback: () => copy_to_clipboard(url),
+                name: tr("Copy URL to clipboard"),
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-copy"
             });
-            spawn_context_menu(e.pageX, e.pageY, ...actions);
         });
 
-        tag_close.click(() => {
-            if($.isFunction(this.onClose) && !this.onClose())
-                return;
-
-            this.handle.deleteChat(this);
-        });
-
-        return this._html_tag = tag;
+        return [container.contents() as JQuery];
+        //return result.root_tag.content.map(e => e.build_html()).map((entry, idx, array) => $.spawn("a").css("display", (idx == 0 ? "inline" : "") + "block").html(entry == "" && idx != 0 ? "&nbsp;" : entry));
     }
 
-    focus() {
-        this.handle.activeChat = this;
-        this.handle.htmlTag.find(".input_box").focus();
-    }
+    export namespace network {
+        export const KB = 1024;
+        export const MB = 1024 * KB;
+        export const GB = 1024 * MB;
+        export const TB = 1024 * GB;
 
-    set name(newName : string) {
-        this._name = newName;
-        this.html_tag.find(".name").text(this._name);
-    }
+        export function format_bytes(value: number, options?: {
+            time?: string,
+            unit?: string,
+            exact?: boolean
+        }) : string {
+            options = options || {};
+            if(typeof options.exact !== "boolean")
+                options.exact = true;
+            if(typeof options.unit !== "string")
+                options.unit = "Bytes";
 
-    set flag_closeable(flag : boolean) {
-        if(this._flag_closeable == flag) return;
+            let points = value.toFixed(0).replace(/(\d)(?=(\d{3})+(?!\d))/g, '$1,');
 
-        this._flag_closeable = flag;
-
-        this.html_tag.toggleClass('closeable', flag);
-    }
-
-    set flag_unread(flag : boolean) {
-        if(this._flag_unread == flag) return;
-        this._flag_unread = flag;
-        this.html_tag.find(".chat-type").attr("class", "chat-type icon " + this.chat_icon());
-        this.html_tag.toggleClass('unread', flag);
-    }
-
-    get flag_offline() { return this._flag_offline; }
-
-    set flag_offline(flag: boolean) {
-        if(flag == this._flag_offline)
-            return;
-
-        this._flag_offline = flag;
-        this.html_tag.toggleClass('offline', flag);
-    }
-
-    private chat_icon() : string {
-        if(this._flag_unread) {
-            switch (this.type) {
-                case ChatType.CLIENT:
-                    return "client-new_chat";
+            let v, unit;
+            if(value > 2 * TB) {
+                unit = "TB";
+                v = value / TB;
+            } else if(value > GB) {
+                unit = "GB";
+                v = value / GB;
+            } else if(value > MB) {
+                unit = "MB";
+                v = value / MB;
+            } else if(value > KB) {
+                unit = "KB";
+                v = value / KB;
+            } else {
+                unit = "";
+                v = value;
             }
+
+            let result = "";
+            if(options.exact || !unit) {
+                result += points;
+                if(options.unit) {
+                    result += " " + options.unit;
+                    if(options.time)
+                        result += "/" + options.time;
+                }
+            }
+            if(unit) {
+                result += (result ? " / " : "") + v.toFixed(2) + " " + unit;
+                if(options.time)
+                    result += "/" + options.time;
+            }
+            return result;
         }
-        switch (this.type) {
-            case ChatType.SERVER:
-                return "client-server_log";
-            case ChatType.CHANNEL:
-                return "client-channel_chat";
-            case ChatType.CLIENT:
-                return "client-player_chat";
-            case ChatType.GENERAL:
-                return "client-channel_chat";
+    }
+
+    export const K = 1000;
+    export const M = 1000 * K;
+    export const G = 1000 * M;
+    export const T = 1000 * G;
+    export function format_number(value: number, options?: {
+        time?: string,
+        unit?: string
+    }) {
+        options = Object.assign(options || {}, {});
+
+        let points = value.toFixed(0).replace(/(\d)(?=(\d{3})+(?!\d))/g, '$1,');
+
+        let v, unit;
+        if(value > 2 * T) {
+            unit = "T";
+            v = value / T;
+        } else if(value > G) {
+            unit = "G";
+            v = value / G;
+        } else if(value > M) {
+            unit = "M";
+            v = value / M;
+        } else if(value > K) {
+            unit = "K";
+            v = value / K;
+        } else {
+            unit = "";
+            v = value;
         }
-        return "";
-    }
-}
-
-
-class ChatBox {
-    //https://regex101.com/r/YQbfcX/2
-    //static readonly URL_REGEX = /^(?<hostname>([a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]{2,63})(?:\/(?<path>(?:[^\s?]+)?)(?:\?(?<query>\S+))?)?$/gm;
-    static readonly URL_REGEX = /^(([a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]{2,63})(?:\/((?:[^\s?]+)?)(?:\?(\S+))?)?$/gm;
-
-    readonly connection_handler: ConnectionHandler;
-    htmlTag: JQuery;
-    chats: ChatEntry[];
-    private _activeChat: ChatEntry;
-
-    private _button_send: JQuery;
-    private _input_message: JQuery;
-
-    constructor(connection_handler: ConnectionHandler) {
-        this.connection_handler = connection_handler;
+        if(unit && options.time)
+            unit = unit + "/" + options.time;
+        return points + " " + (options.unit || "") + (unit ? (" / " + v.toFixed(2) + " " + unit) : "");
     }
 
-    initialize() {
-        this.htmlTag = $("#tmpl_frame_chat").renderTag();
-        this._button_send = this.htmlTag.find(".button-send");
-        this._input_message = this.htmlTag.find(".input-message");
+    export const TIME_SECOND = 1000;
+    export const TIME_MINUTE = 60 * TIME_SECOND;
+    export const TIME_HOUR = 60 * TIME_MINUTE;
+    export const TIME_DAY = 24 * TIME_HOUR;
+    export const TIME_WEEK = 7 * TIME_DAY;
 
-        this._button_send.click(this.onSend.bind(this));
-        this._input_message.keypress(event => {
-            if(event.keyCode == JQuery.Key.Enter && !event.shiftKey) {
-                this.onSend();
-                return false;
-            }
-        }).on('input', (event) => {
-            let text = $(event.target).val().toString();
-            if(this.testMessage(text))
-                this._button_send.removeAttr("disabled");
-            else
-                this._button_send.attr("disabled", "true");
-        }).trigger("input");
+    export function format_time(time: number, default_value: string) {
+        let result = "";
+        if(time > TIME_WEEK) {
+            const amount = Math.floor(time / TIME_WEEK);
+            result += " " + amount + " " + (amount > 1 ? tr("Weeks") : tr("Week"));
+            time -= amount * TIME_WEEK;
+        }
 
-        this.chats = [];
-        this._activeChat = undefined;
+        if(time > TIME_DAY) {
+            const amount = Math.floor(time / TIME_DAY);
+            result += " " + amount + " " + (amount > 1 ? tr("Days") : tr("Day"));
+            time -= amount * TIME_DAY;
+        }
 
-        this.createChat("chat_server", ChatType.SERVER).onMessageSend = (text: string) => {
-            if(!this.connection_handler.serverConnection) {
-                this.serverChat().appendError(tr("Could not send chant message (Not connected)"));
-                return;
-            }
-            this.connection_handler.serverConnection.command_helper.sendMessage(text, ChatType.SERVER).catch(error => {
-                if(error instanceof CommandResult)
-                    return;
+        if(time > TIME_HOUR) {
+            const amount = Math.floor(time / TIME_HOUR);
+            result += " " + amount + " " + (amount > 1 ? tr("Hours") : tr("Hour"));
+            time -= amount * TIME_HOUR;
+        }
 
-                this.serverChat().appendMessage(tr("Failed to send text message."));
-                log.error(LogCategory.GENERAL, tr("Failed to send server text message: %o"), error);
+        if(time > TIME_MINUTE) {
+            const amount = Math.floor(time / TIME_MINUTE);
+            result += " " + amount + " " + (amount > 1 ? tr("Minutes") : tr("Minute"));
+            time -= amount * TIME_MINUTE;
+        }
+
+        if(time > TIME_SECOND) {
+            const amount = Math.floor(time / TIME_SECOND);
+            result += " " + amount + " " + (amount > 1 ? tr("Seconds") : tr("Second"));
+            time -= amount * TIME_SECOND;
+        }
+
+        return result.length > 0 ? result.substring(1) : default_value;
+    }
+
+    let _icon_size_style: JQuery<HTMLStyleElement>;
+    export function set_icon_size(size: string) {
+        if(!_icon_size_style)
+            _icon_size_style = $.spawn("style").appendTo($("#style"));
+
+        _icon_size_style.text("\n" +
+            ".message > .emoji {\n" +
+            "  height: " + size + "!important;\n" +
+            "  width: " + size + "!important;\n" +
+            "}\n"
+        );
+    }
+
+    loader.register_task(loader.Stage.JAVASCRIPT_INITIALIZING, {
+        name: "XBBCode code tag init",
+        function: async () => {
+            /* override default parser */
+            xbbcode.register.register_parser({
+                tag: ["code", "icode", "i-code"],
+                content_tags_whitelist: [],
+
+                build_html(layer) : string {
+                    const klass = layer.tag_normalized != 'code' ? "tag-hljs-inline-code" : "tag-hljs-code";
+                    const language = (layer.options || "").replace("\"", "'").toLowerCase();
+
+                    /* remove heading empty lines */
+                    let text = layer.content.map(e => e.build_text())
+                        .reduce((a, b) => a.length == 0 && b.replace(/[ \n\r\t]+/g, "").length == 0 ? "" : a + b, "")
+                        .replace(/^([ \n\r\t]*)(?=\n)+/g, "");
+                    if(text.startsWith("\r") || text.startsWith("\n"))
+                        text = text.substr(1);
+
+                    let result: HighlightJSResult;
+                    if(window.hljs.getLanguage(language))
+                        result = window.hljs.highlight(language, text, true);
+                    else
+                        result = window.hljs.highlightAuto(text);
+
+                    let html = '<pre class="' + klass + '">';
+                    html += '<code class="hljs" x-code-type="' + language + '" x-highlight-type="' + result.language + '">';
+                    html += result.value;
+                    return html + "</code></pre>";
+                }
             });
-        };
-        this.serverChat().name = tr("Server chat");
-        this.serverChat().flag_closeable = false;
+        },
+        priority: 10
+    });
 
-        this.createChat("chat_channel", ChatType.CHANNEL).onMessageSend = (text: string) => {
-            if(!this.connection_handler.serverConnection) {
-                this.channelChat().appendError(tr("Could not send chant message (Not connected)"));
-                return;
-            }
-
-            this.connection_handler.serverConnection.command_helper.sendMessage(text, ChatType.CHANNEL, this.connection_handler.getClient().currentChannel()).catch(error => {
-                this.channelChat().appendMessage(tr("Failed to send text message."));
-                log.error(LogCategory.GENERAL, tr("Failed to send channel text message: %o"), error);
-            });
-        };
-        this.channelChat().name = tr("Channel chat");
-        this.channelChat().flag_closeable = false;
-
-        this.connection_handler.permissions.initializedListener.push(flag => {
-            if(flag) this.activeChat0(this._activeChat);
-        });
-    }
-
-    createChat(key, type : ChatType = ChatType.CLIENT) : ChatEntry {
-        let chat = new ChatEntry(this, type, key);
-        this.chats.push(chat);
-        this.htmlTag.find(".chats").append(chat.html_tag);
-        if(!this._activeChat) this.activeChat = chat;
-        return chat;
-    }
-
-    open_chats() : ChatEntry[] {
-        return this.chats;
-    }
-
-    findChat(key : string) : ChatEntry {
-        for(let e of this.chats)
-            if(e.key == key) return e;
-        return undefined;
-    }
-
-    deleteChat(chat : ChatEntry) {
-        this.chats.remove(chat);
-        chat.html_tag.detach();
-        if(this._activeChat === chat) {
-            if(this.chats.length > 0)
-                this.activeChat = this.chats.last();
-            else
-                this.activeChat = undefined;
-        }
-    }
-
-
-    onSend() {
-        let text = this._input_message.val().toString();
-        if(!this.testMessage(text)) return;
-        this._input_message.val("");
-        this._input_message.trigger("input");
-
-        /* preprocessing text */
-        const words = text.split(/[ \n]/);
-        for(let index = 0; index < words.length; index++) {
-            const flag_escaped = words[index].startsWith('!');
-            const unescaped = flag_escaped ? words[index].substr(1) : words[index];
-
-            _try:
-            try {
-                const url = new URL(unescaped);
-                log.debug(LogCategory.GENERAL, tr("Chat message contains URL: %o"), url);
-                if(url.protocol !== 'http:' && url.protocol !== 'https:')
-                    break _try;
-                if(flag_escaped)
-                    words[index] = unescaped;
-                else {
-                    text = undefined;
-                    words[index] = "[url=" + url.toString() + "]" + url.toString() + "[/url]";
-                }
-            } catch(e) { /* word isn't an url */ }
-
-            if(unescaped.match(ChatBox.URL_REGEX)) {
-                if(flag_escaped)
-                    words[index] = unescaped;
-                else {
-                    text = undefined;
-                    words[index] = "[url=" + unescaped + "]" + unescaped + "[/url]";
-                }
-            }
-        }
-
-        if(this._activeChat && $.isFunction(this._activeChat.onMessageSend))
-            this._activeChat.onMessageSend(text || words.join(" "));
-    }
-
-    set activeChat(chat : ChatEntry) {
-        if(this.chats.indexOf(chat) === -1) return;
-        if(this._activeChat == chat) return;
-        this.activeChat0(chat);
-    }
-
-    private activeChat0(chat: ChatEntry) {
-        this._activeChat = chat;
-        for(let e of this.chats)
-            e.html_tag.removeClass("active");
-
-        let disable_input = !chat;
-        if(this._activeChat) {
-            this._activeChat.html_tag.addClass("active");
-            this._activeChat.displayHistory();
-
-            if(!disable_input && this.connection_handler && this.connection_handler.permissions && this.connection_handler.permissions.initialized())
-                switch (this._activeChat.type) {
-                    case ChatType.CLIENT:
-                        disable_input = false;
-                        break;
-                    case ChatType.SERVER:
-                        disable_input = !this.connection_handler.permissions.neededPermission(PermissionType.B_CLIENT_SERVER_TEXTMESSAGE_SEND).granted(1);
-                        break;
-                    case ChatType.CHANNEL:
-                        disable_input = !this.connection_handler.permissions.neededPermission(PermissionType.B_CLIENT_CHANNEL_TEXTMESSAGE_SEND).granted(1);
-                        break;
-                }
-        }
-        this._input_message.prop("disabled", disable_input);
-    }
-
-    get activeChat(){ return this._activeChat; }
-
-    channelChat() : ChatEntry {
-        return this.findChat("chat_channel");
-    }
-
-    serverChat() {
-        return this.findChat("chat_server");
-    }
-
-    focus(){
-        this._input_message.focus();
-    }
-
-    private testMessage(message: string) : boolean {
-        message = message
-            .replace(/ /gi, "")
-            .replace(/<br>/gi, "")
-            .replace(/\n/gi, "")
-            .replace(/<br\/>/gi, "");
-        return message.length > 0;
-    }
+    loader.register_task(loader.Stage.JAVASCRIPT_INITIALIZING, {
+        name: "icon size init",
+        function: async () => {
+            MessageHelper.set_icon_size((settings.static_global(Settings.KEY_ICON_SIZE) / 100).toFixed(2) + "em");
+        },
+        priority: 10
+    });
 }

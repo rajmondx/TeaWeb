@@ -1,3 +1,5 @@
+//Used by CertAccept popup
+
 if(typeof(customElements) !== "undefined") {
     try {
         class X_Properties extends HTMLElement {}
@@ -18,6 +20,8 @@ interface SettingsKey<T> {
     fallback_imports?: {[key: string]:(value: string) => T};
     description?: string;
     default_value?: T;
+
+    require_restart?: boolean;
 }
 
 class SettingsBase {
@@ -135,10 +139,22 @@ class StaticSettings extends SettingsBase {
 }
 
 class Settings extends StaticSettings {
+    static readonly KEY_DISABLE_COSMETIC_SLOWDOWN: SettingsKey<boolean> = {
+        key: 'disable_cosmetic_slowdown',
+        description: 'Disable the cosmetic slowdows in some processes, like icon upload.'
+    };
+
     static readonly KEY_DISABLE_CONTEXT_MENU: SettingsKey<boolean> = {
         key: 'disableContextMenu',
         description: 'Disable the context menu for the channel tree which allows to debug the DOM easier'
     };
+
+    static readonly KEY_DISABLE_GLOBAL_CONTEXT_MENU: SettingsKey<boolean> = {
+        key: 'disableGlobalContextMenu',
+        description: 'Disable the general context menu prevention',
+        default_value: false
+    };
+
     static readonly KEY_DISABLE_UNLOAD_DIALOG: SettingsKey<boolean> = {
         key: 'disableUnloadDialog',
         description: 'Disables the unload popup on side closing'
@@ -149,6 +165,8 @@ class Settings extends StaticSettings {
     };
     static readonly KEY_DISABLE_MULTI_SESSION: SettingsKey<boolean> = {
         key: 'disableMultiSession',
+        default_value: false,
+        require_restart: true
     };
 
     static readonly KEY_LOAD_DUMMY_ERROR: SettingsKey<boolean> = {
@@ -189,14 +207,119 @@ class Settings extends StaticSettings {
     static readonly KEY_FLAG_CONNECT_PASSWORD: SettingsKey<boolean> = {
         key: 'connect_password_hashed'
     };
+    static readonly KEY_CONNECT_HISTORY: SettingsKey<string> = {
+        key: 'connect_history'
+    };
 
     static readonly KEY_CERTIFICATE_CALLBACK: SettingsKey<string> = {
         key: 'certificate_callback'
     };
 
-    static readonly FN_SERVER_CHANNEL_SUBSCRIBE_MODE: (channel: ChannelEntry) => SettingsKey<ChannelSubscribeMode> = channel => {
+    /* sounds */
+    static readonly KEY_SOUND_MASTER: SettingsKey<number> = {
+        key: 'audio_master_volume',
+        default_value: 100
+    };
+
+    static readonly KEY_SOUND_MASTER_SOUNDS: SettingsKey<number> = {
+        key: 'audio_master_volume_sounds',
+        default_value: 100
+    };
+
+    static readonly KEY_CHAT_FIXED_TIMESTAMPS: SettingsKey<boolean> = {
+        key: 'chat_fixed_timestamps',
+        default_value: false,
+        description: 'Enables fixed timestamps for chat messages and disabled the updating once (2 seconds ago... etc)'
+    };
+
+    static readonly KEY_CHAT_COLLOQUIAL_TIMESTAMPS: SettingsKey<boolean> = {
+        key: 'chat_colloquial_timestamps',
+        default_value: true,
+        description: 'Enabled colloquial timestamp formatting like "Yesterday at ..." or "Today at ..."'
+    };
+
+    static readonly KEY_CHAT_COLORED_EMOJIES: SettingsKey<boolean> = {
+        key: 'chat_colored_emojies',
+        default_value: true,
+        description: 'Enables colored emojies powered by Twemoji'
+    };
+
+    static readonly KEY_CHAT_TAG_URLS: SettingsKey<boolean> = {
+        key: 'chat_tag_urls',
+        default_value: true,
+        description: 'Automatically link urls with [url]'
+    };
+
+    static readonly KEY_CHAT_ENABLE_MARKDOWN: SettingsKey<boolean> = {
+        key: 'chat_enable_markdown',
+        default_value: true,
+        description: 'Enabled markdown chat support.'
+    };
+
+    static readonly KEY_CHAT_ENABLE_BBCODE: SettingsKey<boolean> = {
+        key: 'chat_enable_bbcode',
+        default_value: true,
+        description: 'Enabled bbcode support in chat.'
+    };
+
+    static readonly KEY_SWITCH_INSTANT_CHAT: SettingsKey<boolean> = {
+        key: 'switch_instant_chat',
+        default_value: true,
+        description: 'Directly switch to channel chat on channel select'
+    };
+
+    static readonly KEY_SWITCH_INSTANT_CLIENT: SettingsKey<boolean> = {
+        key: 'switch_instant_client',
+        default_value: true,
+        description: 'Directly switch to client info on client select'
+    };
+
+    static readonly KEY_HOSTBANNER_BACKGROUND: SettingsKey<boolean> = {
+        key: 'hostbanner_background',
+        default_value: false,
+        description: 'Enables a default background begind the hostbanner'
+    };
+
+    static readonly KEY_CHANNEL_EDIT_ADVANCED: SettingsKey<boolean> = {
+        key: 'channel_edit_advanced',
+        default_value: false,
+        description: 'Edit channels in advanced mode with a lot more settings'
+    };
+
+    static readonly KEY_TEAFORO_URL: SettingsKey<string> = {
+        key: "teaforo_url",
+        default_value: "https://forum.teaspeak.de/"
+    };
+
+    static readonly KEY_FONT_SIZE: SettingsKey<number> = {
+        key: "font_size"
+    };
+
+    static readonly KEY_ICON_SIZE: SettingsKey<number> = {
+        key: "icon_size",
+        default_value: 100
+    };
+
+    static readonly KEY_LAST_INVITE_LINK_TYPE: SettingsKey<string> = {
+        key: "last_invite_link_type",
+        default_value: "tea-web"
+    };
+
+    static readonly FN_INVITE_LINK_SETTING: (name: string) => SettingsKey<string> = name => {
         return {
-            key: 'channel_subscribe_mode_' + channel.getChannelId()
+            key: 'invite_link_setting_' + name
+        }
+    };
+
+    static readonly FN_SERVER_CHANNEL_SUBSCRIBE_MODE: (channel_id: number) => SettingsKey<number> = channel => {
+        return {
+            key: 'channel_subscribe_mode_' + channel
+        }
+    };
+
+    static readonly FN_PROFILE_RECORD: (name: string) => SettingsKey<any> = name => {
+        return {
+            key: 'profile_record' + name
         }
     };
 
@@ -215,6 +338,10 @@ class Settings extends StaticSettings {
         return result;
     })();
 
+    static initialize() {
+        settings = new Settings();
+    }
+
     private cacheGlobal = {};
     private saveWorker: NodeJS.Timer;
     private updated: boolean = false;
@@ -230,14 +357,17 @@ class Settings extends StaticSettings {
     }
 
     static_global?<T>(key: string | SettingsKey<T>, _default?: T) : T {
+        const actual_default = typeof(_default) === "undefined" && typeof(key) === "object" && 'default_value' in key ? key.default_value : _default;
+
         const default_object = { seed: Math.random() } as any;
         let _static = this.static(key, default_object, typeof _default);
-        if(_static !== default_object) return StaticSettings.transformStO(_static, _default);
-        return this.global<T>(key, _default);
+        if(_static !== default_object) return StaticSettings.transformStO(_static, actual_default);
+        return this.global<T>(key, actual_default);
     }
 
     global?<T>(key: string | SettingsKey<T>, _default?: T) : T {
-        return StaticSettings.resolveKey(Settings.keyify(key), _default, key => this.cacheGlobal[key]);
+        const actual_default = typeof(_default) === "undefined" && typeof(key) === "object" && 'default_value' in key ? key.default_value : _default;
+        return StaticSettings.resolveKey(Settings.keyify(key), actual_default, key => this.cacheGlobal[key]);
     }
 
     changeGlobal<T>(key: string | SettingsKey<T>, value?: T){
@@ -257,14 +387,17 @@ class Settings extends StaticSettings {
         this.updated = false;
         let global = JSON.stringify(this.cacheGlobal);
         localStorage.setItem("settings.global", global);
+        if(localStorage.save)
+            localStorage.save();
     }
 }
 
 class ServerSettings extends SettingsBase {
     private cacheServer = {};
-    private currentServer: ServerEntry;
+    private _server_unique_id: string;
     private _server_save_worker: NodeJS.Timer;
     private _server_settings_updated: boolean = false;
+    private _destroyed = false;
 
     constructor() {
         super();
@@ -274,11 +407,23 @@ class ServerSettings extends SettingsBase {
         }, 5 * 1000);
     }
 
+    destroy() {
+        this._destroyed = true;
+
+        this._server_unique_id = undefined;
+        this.cacheServer = undefined;
+
+        clearInterval(this._server_save_worker);
+        this._server_save_worker = undefined;
+    }
+
     server?<T>(key: string | SettingsKey<T>, _default?: T) : T {
+        if(this._destroyed) throw "destroyed";
         return StaticSettings.resolveKey(Settings.keyify(key), _default, key => this.cacheServer[key]);
     }
 
     changeServer<T>(key: string | SettingsKey<T>, value?: T) {
+        if(this._destroyed) throw "destroyed";
         key = Settings.keyify(key);
 
         if(this.cacheServer[key.key] == value) return;
@@ -290,29 +435,33 @@ class ServerSettings extends SettingsBase {
             this.save();
     }
 
-    setServer(server: ServerEntry) {
-        if(this.currentServer) {
+    setServer(server_unique_id: string) {
+        if(this._destroyed) throw "destroyed";
+        if(this._server_unique_id) {
             this.save();
             this.cacheServer = {};
-            this.currentServer = undefined;
+            this._server_unique_id = undefined;
         }
-        this.currentServer = server;
+        this._server_unique_id = server_unique_id;
 
-        if(this.currentServer) {
-            let serverId = this.currentServer.properties.virtualserver_unique_identifier;
-            this.cacheServer = JSON.parse(localStorage.getItem("settings.server_" + serverId));
+        if(this._server_unique_id) {
+            this.cacheServer = JSON.parse(localStorage.getItem("settings.server_" + server_unique_id));
             if(!this.cacheServer)
                 this.cacheServer = {};
         }
     }
 
     save() {
+        if(this._destroyed) throw "destroyed";
         this._server_settings_updated = false;
 
-        if(this.currentServer) {
-            let serverId = this.currentServer.properties.virtualserver_unique_identifier;
+        if(this._server_unique_id) {
             let server = JSON.stringify(this.cacheServer);
-            localStorage.setItem("settings.server_" + serverId, server);
+            localStorage.setItem("settings.server_" + this._server_unique_id, server);
+            if(localStorage.save)
+                localStorage.save();
         }
     }
 }
+
+let settings: Settings;

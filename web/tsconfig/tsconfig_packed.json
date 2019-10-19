@@ -3,12 +3,15 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "module": "none",
-    "outFile": "../generated/client.js",
+    "outFile": "../generated/web.js",
     "allowJs": true
   },
+  "exclude": [
+    "../js/workers"
+  ],
   "include": [
+    "../types",
     "../declarations/imports_*.d.ts",
-    "../js/**/*.ts",
-    "../../shared/generated/shared.js"
+    "../js/**/*.ts"
   ]
 }

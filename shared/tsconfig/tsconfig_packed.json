@@ -5,6 +5,7 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "target": "es6",
     "module": "none",
     "outFile": "../generated/shared.js",
     "plugins": [ /* ttypescript */
@@ -17,12 +18,13 @@
     ]
   },
   "exclude": [
-    "../js/workers",
-    "../js/load.ts"
+    "../js/workers"
   ],
   "include": [
+    "../types",
     "../declarations/imports_*.d.ts",
-    "../declarations/exports_loader.d.ts",
-    "../js/**/*.ts"
+    "../declarations/exports_loader_app.d.ts",
+    "../js/**/*.ts",
+    "../backend"
   ]
 }

@@ -4,6 +4,7 @@
     "target": "es6",
     "module": "commonjs",
     "sourceMap": true,
+    "experimentalDecorators": true,
     "plugins": [ /* ttypescript */
       {
         "transform": "../../tools/trgen/ttsc_transformer.js",
@@ -17,7 +18,10 @@
     "../js/workers"
   ],
   "include": [
+    "../types",
     "../declarations/imports_*.d.ts",
+    "../declarations/exports_loader_app.d.ts",
+    "../backend",
     "../js/**/*.ts"
   ]
 }

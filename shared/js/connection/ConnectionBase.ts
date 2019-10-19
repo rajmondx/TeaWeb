@@ -36,6 +36,14 @@ namespace connection {
 
         abstract get onconnectionstatechanged() : ConnectionStateListener;
         abstract set onconnectionstatechanged(listener: ConnectionStateListener);
+
+        abstract remote_address() : ServerAddress; /* only valid when connected */
+        abstract handshake_handler() : HandshakeHandler; /* only valid when connected */
+
+        abstract ping() : {
+            native: number,
+            javascript?: number
+        };
     }
 
     export namespace voice {
@@ -78,8 +86,11 @@ namespace connection {
             abstract available_clients() : VoiceClient[];
             abstract unregister_client(client: VoiceClient) : Promise<void>;
 
-            abstract voice_recorder() : VoiceRecorder;
-            abstract acquire_voice_recorder(recorder: VoiceRecorder | undefined);
+            abstract voice_recorder() : RecorderProfile;
+            abstract acquire_voice_recorder(recorder: RecorderProfile | undefined) : Promise<void>;
+
+            abstract get_encoder_codec() : number;
+            abstract set_encoder_codec(codec: number);
         }
     }
 
@@ -123,6 +134,11 @@ namespace connection {
 
         protected constructor(connection: AbstractServerConnection) {
             this.connection = connection;
+        }
+
+        destroy() {
+            this.command_handlers = undefined;
+            this.single_command_handler = undefined;
         }
 
         register_handler(handler: AbstractCommandHandler) {

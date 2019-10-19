@@ -33,11 +33,21 @@ namespace htmltags {
         if(properties.client_id)
             result = result + "client-id='" + properties.client_id + "' ";
 
-        if(properties.client_unique_id && properties.client_unique_id != "unknown")
-            result = result + "client-unique-id='" + encodeURIComponent(properties.client_unique_id) + "' ";
+        if(properties.client_unique_id && properties.client_unique_id != "unknown") {
+            try {
+                result = result + "client-unique-id='" + encodeURIComponent(properties.client_unique_id) + "' ";
+            } catch(error) {
+                console.warn(tr("Failed to generate client tag attribute 'client-unique-id': %o"), error);
+            }
+        }
 
-        if(properties.client_name)
-            result = result + "client-name='" + encodeURIComponent(properties.client_name) + "' ";
+        if(properties.client_name) {
+            try {
+                result = result + "client-name='" + encodeURIComponent(properties.client_name) + "' ";
+            } catch(error) {
+                console.warn(tr("Failed to generate client tag attribute 'client-name': %o"), error);
+            }
+        }
 
         /* add the click handler */
         result += "oncontextmenu='return htmltags.callbacks.callback_context_client($(this));'";
@@ -52,6 +62,7 @@ namespace htmltags {
         {
             if(properties.add_braces)
                 result = result + "\"";
+
             result = result + MessageHelper.htmlEscape(properties.client_name || "undefined").join(" ");
             if(properties.add_braces)
                 result = result + "\"";
@@ -62,6 +73,10 @@ namespace htmltags {
             result += "</div>";
         }
         return result;
+    }
+
+    export function generate_client_object(properties: ClientProperties) : JQuery {
+        return $(this.generate_client(properties));
     }
 
     /* required for the bbcodes */
@@ -100,6 +115,10 @@ namespace htmltags {
             result += "</div>";
         }
         return result;
+    }
+
+    export function generate_channel_object(properties: ChannelProperties) : JQuery {
+        return $(this.generate_channel(properties));
     }
 
 
@@ -155,49 +174,46 @@ namespace htmltags {
 
     namespace bbcodes {
         /* the = because we sometimes get that */
-        //const url_client_regex = /(?:=)?client:\/\/(?<client_id>[0-9]+)\/(?<client_unique_id>[a-zA-Z0-9+=#]+)~(?<client_name>(?:[^%]|%[0-9A-Fa-f]{2})+)$/g;
-        const url_client_regex = /(?:=)?client:\/\/([0-9]+)\/([a-zA-Z0-9+=/#]+)~((?:[^%]|%[0-9A-Fa-f]{2})+)$/g; /* IDK which browsers already support group naming */
-        const url_channel_regex = /(?:=)?channel:\/\/([0-9]+)~((?:[^%]|%[0-9A-Fa-f]{2})+)$/g;
+        //const url_client_regex = /?client:\/\/(?<client_id>[0-9]+)\/(?<client_unique_id>[a-zA-Z0-9+=#]+)~(?<client_name>(?:[^%]|%[0-9A-Fa-f]{2})+)$/g;
+        const url_client_regex = /client:\/\/([0-9]+)\/([a-zA-Z0-9+=/#]+)~((?:[^%]|%[0-9A-Fa-f]{2})+)$/g; /* IDK which browsers already support group naming */
+        const url_channel_regex = /channel:\/\/([0-9]+)~((?:[^%]|%[0-9A-Fa-f]{2})+)$/g;
 
         function initialize() {
-            const origin_url = XBBCODE.tags()["url"];
+            const origin_url = xbbcode.register.find_parser('url');
+            xbbcode.register.register_parser({
+                tag: 'url',
+                build_html_tag_open(layer): string {
+                    if(layer.options) {
+                        if(layer.options.match(url_channel_regex)) {
+                            const groups = url_channel_regex.exec(layer.options);
 
-            XBBCODE.addTags({
-                function: {
-                    openTag: (params, content) => {
-                        if(params) {
-                            if(params.match(url_channel_regex)) {
-                                const groups = url_channel_regex.exec(params);
+                            return generate_channel_open({
+                                add_braces: false,
+                                channel_id: parseInt(groups[1]),
+                                channel_name: decodeURIComponent(groups[2])
+                            });
+                        } else if(layer.options.match(url_client_regex)) {
+                            const groups = url_client_regex.exec(layer.options);
 
-                                return generate_channel_open({
-                                    add_braces: false,
-                                    channel_id: parseInt(groups[1]),
-                                    channel_name: decodeURIComponent(groups[2])
-                                });
-                            } else if(params.match(url_client_regex)) {
-                                const groups = url_client_regex.exec(params);
-
-                                return generate_client_open({
-                                    add_braces: false,
-                                    client_id: parseInt(groups[1]),
-                                    client_unique_id: groups[2],
-                                    client_name: decodeURIComponent(groups[3])
-                                });
-                            }
+                            return generate_client_open({
+                                add_braces: false,
+                                client_id: parseInt(groups[1]),
+                                client_unique_id: groups[2],
+                                client_name: decodeURIComponent(groups[3])
+                            });
                         }
-                        return origin_url.openTag(params, content);
-                    },
-                    closeTag: (params, content) => {
-                        if(params) {
-                            if(params.match(url_client_regex))
-                                return "</div>";
-                            if(params.match(url_channel_regex))
-                                return "</div>";
-                        }
-                        return origin_url.closeTag(params, content);
                     }
+                    return origin_url.build_html_tag_open(layer);
                 },
-                tag: "url"
+                build_html_tag_close(layer): string {
+                    if(layer.options) {
+                        if(layer.options.match(url_client_regex))
+                            return "</div>";
+                        if(layer.options.match(url_channel_regex))
+                            return "</div>";
+                    }
+                    return origin_url.build_html_tag_close(layer);
+                }
             })
             /*
               "img":  {

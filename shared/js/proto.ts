@@ -1,3 +1,5 @@
+//Used by CertAccept popup
+
 interface Array<T> {
     remove(elem?: T): boolean;
     last?(): T;
@@ -6,8 +8,8 @@ interface Array<T> {
 }
 
 interface JSON {
-    map_to<T>(object: T, json: any, variables?: string | string[], validator?: (map_field: string, map_value: string) => boolean, variable_direction?: number) : T;
-    map_field_to<T>(object: T, value: any, field: string) : T;
+    map_to<T>(object: T, json: any, variables?: string | string[], validator?: (map_field: string, map_value: string) => boolean, variable_direction?: number) : number;
+    map_field_to<T>(object: T, value: any, field: string) : boolean;
 }
 
 type JQueryScrollType = "height" | "width";
@@ -24,6 +26,9 @@ interface JQuery<TElement = HTMLElement> {
     alert() : JQuery<TElement>;
     modal(properties: any) : this;
     bootstrapMaterialDesign() : this;
+
+    /* first element which matches the selector, could be the element itself or a parent */
+    firstParent(selector: string) : JQuery;
 }
 
 interface JQueryStatic<TElement extends Node = HTMLElement> {
@@ -37,7 +42,7 @@ interface String {
 }
 
 if(!JSON.map_to) {
-    JSON.map_to = function <T>(object: T, json: any, variables?: string | string[], validator?: (map_field: string, map_value: string) => boolean, variable_direction?: number): T {
+    JSON.map_to = function <T>(object: T, json: any, variables?: string | string[], validator?: (map_field: string, map_value: string) => boolean, variable_direction?: number): number {
         if (!validator) validator = (a, b) => true;
 
         if (!variables) {
@@ -54,6 +59,7 @@ if(!JSON.map_to) {
             variables = [variables];
         }
 
+        let updates = 0;
         for (let field of variables) {
             if (!json[field]) {
                 console.trace(tr("Json does not contains %s"), field);
@@ -64,24 +70,32 @@ if(!JSON.map_to) {
                 continue;
             }
 
-            JSON.map_field_to(object, json[field], field);
+            if(JSON.map_field_to(object, json[field], field))
+                updates++;
         }
-        return object;
+        return updates;
     }
 }
 
 if(!JSON.map_field_to) {
-    JSON.map_field_to = function<T>(object: T, value: any, field: string) : T {
+    JSON.map_field_to = function<T>(object: T, value: any, field: string) : boolean {
         let field_type = typeof(object[field]);
+        let new_object;
         if(field_type == "string" || field_type == "object" || field_type == "undefined")
-            object[field as string] = value;
+            new_object = value;
         else if(field_type == "number")
-            object[field as string] = parseFloat(value);
+            new_object = parseFloat(value);
         else if(field_type == "boolean")
-            object[field as string] = value == "1" || value == "true";
-        else console.warn(tr("Invalid object type %s for entry %s"), field_type, field);
+            new_object = value == "1" || value == "true";
+        else {
+            console.warn(tr("Invalid object type %s for entry %s"), field_type, field);
+            return false;
+        }
 
-        return object;
+        if(new_object === object[field as string]) return false;
+
+        object[field as string] = new_object;
+        return true;
     }
 }
 
@@ -118,12 +132,16 @@ if(typeof ($) !== "undefined") {
         }
     }
     if(!$.fn.renderTag) {
-        $.fn.renderTag = function (values?: any) : JQuery {
+        $.fn.renderTag = function (this: JQuery, values?: any) : JQuery {
             let result;
             if(this.render) {
                 result = $(this.render(values));
             } else {
                 const template = window.jsrender.render[this.attr("id")];
+                if(!template) {
+                    console.error("Tried to render template %o, but template is not available!", this.attr("id"));
+                    throw "missing template " + this.attr("id");
+                }
                 /*
                 result = window.jsrender.templates("tmpl_permission_entry", $("#tmpl_permission_entry").html());
                 result = window.jsrender.templates("xxx", this.html());
@@ -179,6 +197,12 @@ if(typeof ($) !== "undefined") {
             const result = this.width();
             this.attr("style", original_style || "");
             return result;
+        }
+    if(!$.fn.firstParent)
+        $.fn.firstParent = function (this: JQuery<HTMLElement>, selector: string) {
+            if(this.is(selector))
+                return this;
+            return this.parent(selector);
         }
 }
 
@@ -243,8 +267,39 @@ function calculate_width(text: string) : number {
     return size;
 }
 
+interface Twemoji {
+    parse(message: string) : string;
+}
+declare let twemoji: Twemoji;
+
+interface HighlightJS {
+    listLanguages() : string[];
+    getLanguage(name: string) : any | undefined;
+
+    highlight(language: string, text: string, ignore_illegals?: boolean) : HighlightJSResult;
+    highlightAuto(text: string) : HighlightJSResult;
+}
+
+interface HighlightJSResult {
+    language: string;
+    relevance: number;
+
+    value: string;
+    second_best?: any;
+}
+
+interface DOMPurify {
+    sanitize(html: string, config?: {
+        ADD_ATTR?: string[]
+    }) : string;
+}
+declare let DOMPurify: DOMPurify;
+
+declare let remarkable: typeof window.remarkable;
+
 declare class webkitAudioContext extends AudioContext {}
 declare class webkitOfflineAudioContext extends OfflineAudioContext {}
+
 interface Window {
     readonly webkitAudioContext: typeof webkitAudioContext;
     readonly AudioContext: typeof webkitAudioContext;
@@ -254,6 +309,10 @@ interface Window {
     readonly Pointer_stringify: any;
     readonly jsrender: any;
 
+    twemoji: Twemoji;
+    hljs: HighlightJS;
+    remarkable: any;
+
     require(id: string): any;
 }
 
@@ -262,4 +321,7 @@ interface Navigator {
         name: string,
         version: string
     };
+
+    mozGetUserMedia(constraints: MediaStreamConstraints, successCallback: NavigatorUserMediaSuccessCallback, errorCallback: NavigatorUserMediaErrorCallback): void;
+    webkitGetUserMedia(constraints: MediaStreamConstraints, successCallback: NavigatorUserMediaSuccessCallback, errorCallback: NavigatorUserMediaErrorCallback): void;
 }

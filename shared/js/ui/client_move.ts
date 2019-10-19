@@ -10,6 +10,8 @@ class ClientMover {
     hovered_channel: HTMLDivElement;
     callback: (channel?: ChannelEntry) => any;
 
+    enabled: boolean = true;
+
     private _bound_finish;
     private _bound_move;
     private _active: boolean = false;
@@ -43,9 +45,12 @@ class ClientMover {
     activate(client: ClientEntry | ClientEntry[], callback: (channel?: ChannelEntry) => any, event: any) {
         this.finish_listener(undefined);
 
+        if(!this.enabled)
+            return false;
+
         this.selected_client = client;
         this.callback = callback;
-        console.log(tr("Starting mouse move"));
+        log.debug(LogCategory.GENERAL, tr("Starting mouse move"));
 
         ClientMover.listener_root.on('mouseup', this._bound_finish = this.finish_listener.bind(this)).on('mousemove', this._bound_move = this.move_listener.bind(this));
 
@@ -58,6 +63,9 @@ class ClientMover {
     }
 
     private move_listener(event) {
+        if(!this.enabled)
+            return;
+
         //console.log("Mouse move: " + event.pageX + " - " + event.pageY);
         if(!event.pageX || !event.pageY) return;
         if(!this.origin_point)
@@ -104,6 +112,7 @@ class ClientMover {
 
     private finish_listener(event) {
         ClientMover.move_element.hide();
+        log.debug(LogCategory.GENERAL, tr("Finishing mouse move"));
 
         const channel_id = this.hovered_channel ? parseInt(this.hovered_channel.getAttribute("channel-id")) : 0;
         ClientMover.listener_root.unbind('mouseleave', this._bound_finish);

@@ -6,7 +6,7 @@ namespace profiles.identities {
     }
 
     export interface Identity {
-        name() : string;
+        fallback_name(): string | undefined ;
         uid() : string;
         type() : IdentitifyType;
 
@@ -25,7 +25,7 @@ namespace profiles.identities {
                 identity = new NameIdentity();
                 break;
             case IdentitifyType.TEAFORO:
-                identity = new TeaForumIdentity(undefined, undefined);
+                identity = new TeaForumIdentity(undefined);
                 break;
             case IdentitifyType.TEAMSPEAK:
                 identity = new TeaSpeakIdentity(undefined, undefined);
@@ -52,7 +52,7 @@ namespace profiles.identities {
                 identity = new NameIdentity();
                 break;
             case IdentitifyType.TEAFORO:
-                identity = new TeaForumIdentity(undefined, undefined);
+                identity = new TeaForumIdentity(undefined);
                 break;
             case IdentitifyType.TEAMSPEAK:
                 identity = new TeaSpeakIdentity(undefined, undefined);

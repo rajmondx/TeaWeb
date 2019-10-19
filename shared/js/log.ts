@@ -1,15 +1,21 @@
+//Used by CertAccept popup
+
 enum LogCategory {
     CHANNEL,
     CHANNEL_PROPERTIES, /* separating channel and channel properties because on channel init logging is a big bottleneck */
     CLIENT,
+    BOOKMARKS,
     SERVER,
     PERMISSIONS,
     GENERAL,
     NETWORKING,
     VOICE,
+    CHAT,
+    AUDIO,
     I18N,
     IPC,
-    IDENTITIES
+    IDENTITIES,
+    STATISTICS
 }
 
 namespace log {
@@ -26,13 +32,17 @@ namespace log {
         [LogCategory.CHANNEL_PROPERTIES,        "Channel    "],
         [LogCategory.CLIENT,                    "Client     "],
         [LogCategory.SERVER,                    "Server     "],
+        [LogCategory.BOOKMARKS,                 "Bookmark   "],
         [LogCategory.PERMISSIONS,               "Permission "],
         [LogCategory.GENERAL,                   "General    "],
         [LogCategory.NETWORKING,                "Network    "],
         [LogCategory.VOICE,                     "Voice      "],
+        [LogCategory.AUDIO,                     "Audio      "],
+        [LogCategory.CHANNEL,                   "Chat       "],
         [LogCategory.I18N,                      "I18N       "],
-        [LogCategory.IDENTITIES,                "IDENTITIES "],
-        [LogCategory.IPC,                       "IPC        "]
+        [LogCategory.IDENTITIES,                "Identities "],
+        [LogCategory.IPC,                       "IPC        "],
+        [LogCategory.STATISTICS,                "Statistics "]
     ]);
 
     export let enabled_mapping = new Map<number, boolean>([
@@ -40,37 +50,58 @@ namespace log {
         [LogCategory.CHANNEL_PROPERTIES,    false],
         [LogCategory.CLIENT,                true],
         [LogCategory.SERVER,                true],
+        [LogCategory.BOOKMARKS,             true],
         [LogCategory.PERMISSIONS,           true],
         [LogCategory.GENERAL,               true],
         [LogCategory.NETWORKING,            true],
         [LogCategory.VOICE,                 true],
+        [LogCategory.AUDIO,                 true],
+        [LogCategory.CHAT,                  true],
         [LogCategory.I18N,                  false],
         [LogCategory.IDENTITIES,            true],
-        [LogCategory.IPC,                   true]
+        [LogCategory.IPC,                   true],
+        [LogCategory.STATISTICS,            true]
+    ]);
+
+    //Values will be overridden by initialize()
+    export let level_mapping = new Map<LogType, boolean>([
+        [LogType.TRACE,         true],
+        [LogType.DEBUG,         true],
+        [LogType.INFO,          true],
+        [LogType.WARNING,       true],
+        [LogType.ERROR,         true]
     ]);
 
     enum GroupMode {
         NATIVE,
         PREFIX
     }
-    const group_mode: GroupMode = GroupMode.NATIVE;
+    const group_mode: GroupMode = GroupMode.PREFIX;
 
-    loader.register_task(loader.Stage.LOADED, {
-        name: "log enabled initialisation",
-        function: async () => initialize(),
-        priority: 10
-    });
-
-    //Example: <url>?log.i18n.enabled=0
-    export function initialize() {
+    //Category Example: <url>?log.i18n.enabled=0
+    //Level Example A: <url>?log.level.trace.enabled=0
+    //Level Example B: <url>?log.level=0
+    export function initialize(default_level: LogType) {
         for(const category of Object.keys(LogCategory).map(e => parseInt(e))) {
             if(isNaN(category)) continue;
-            const category_name = LogCategory[category];
-            enabled_mapping[category] = settings.static_global<boolean>("log." + category_name.toLowerCase() + ".enabled", enabled_mapping.get(category));
+            const category_name = LogCategory[category].toLowerCase();
+            enabled_mapping.set(category, settings.static_global<boolean>("log." + category_name.toLowerCase() + ".enabled", enabled_mapping.get(category)));
+        }
+
+        const base_level = settings.static_global<number>("log.level", default_level);
+
+        for(const level of Object.keys(LogType).map(e => parseInt(e))) {
+            if(isNaN(level)) continue;
+
+            const level_name = LogType[level].toLowerCase();
+            level_mapping.set(level, settings.static_global<boolean>("log." + level_name + ".enabled", level >= base_level));
         }
     }
 
     function logDirect(type: LogType, message: string, ...optionalParams: any[]) {
+        if(!level_mapping.get(type))
+            return;
+
         switch (type) {
             case LogType.TRACE:
             case LogType.DEBUG:
@@ -86,11 +117,10 @@ namespace log {
                 console.error(message, ...optionalParams);
                 break;
         }
-        //console.log("This is %cMy stylish message", "color: yellow; font-style: italic; background-color: blue;padding: 2px");
     }
 
     export function log(type: LogType, category: LogCategory, message: string, ...optionalParams: any[]) {
-        if(!enabled_mapping[category]) return;
+        if(!enabled_mapping.get(category)) return;
 
         optionalParams.unshift(category_mapping.get(category));
         message = "[%s] " + message;
@@ -124,13 +154,15 @@ namespace log {
         return new Group(group_mode, level, category, name, optionalParams);
     }
 
-    export function table(title: string, arguments: any) {
+    export function table(level: LogType, category: LogCategory, title: string, arguments: any) {
         if(group_mode == GroupMode.NATIVE) {
             console.groupCollapsed(title);
             console.table(arguments);
             console.groupEnd();
         } else {
-            console.log("Snipped table %s", title);
+            if(!enabled_mapping.get(category) || !level_mapping.get(level))
+                return;
+            logDirect(level, tr("Snipped table \"%s\""), title);
         }
     }
 
@@ -154,7 +186,7 @@ namespace log {
             this.category = category;
             this.name = name;
             this.optionalParams = optionalParams;
-            this.enabled = enabled_mapping[category];
+            this.enabled = enabled_mapping.get(category);
         }
 
         group(level: LogType, name: string, ...optionalParams: any[]) : Group {
@@ -190,8 +222,9 @@ namespace log {
             }
             if(this.mode == GroupMode.NATIVE)
                 logDirect(this.level, message, ...optionalParams);
-            else
-                logDirect(this.level, this._log_prefix + message, ...optionalParams);
+            else {
+                logDirect(this.level, "[%s] " + this._log_prefix + message, category_mapping.get(this.category), ...optionalParams);
+            }
             return this;
         }
 
@@ -211,3 +244,5 @@ namespace log {
         }
     }
 }
+
+import LogType = log.LogType;

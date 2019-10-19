@@ -24,9 +24,25 @@ function has_modifier<T extends ts.Modifier["kind"]>(modifiers: ts.ModifiersArra
 function append_modifier<T extends ts.Modifier["kind"]>(modifiers: ts.ModifiersArray | undefined, target: T) : ts.ModifiersArray {
     if(has_modifier(modifiers, target)) return modifiers;
 
-    return ts.createNodeArray([ts.createModifier(target as number), ...(modifiers || [])], (modifiers || {hasTrailingComma: false}).hasTrailingComma);
+    return ts.createNodeArray(
+        [ts.createModifier(target as number), ...(modifiers || [])].map((e, index, array) => {
+            const range = ts.getCommentRange(e);
+            if(range.end === -1 && range.pos === -1)
+                return e;
+            ts.setCommentRange(e, {pos: -1, end: -1});
+
+            const first_range = ts.getCommentRange(array[0]);
+            if(first_range.end === -1 && first_range.pos === -1)
+                ts.setCommentRange(array[0], range);
+            else
+                console.warn("Dropping comment on node because first node already has a comment");
+            return e;
+        }),
+        (modifiers || {hasTrailingComma: false}).hasTrailingComma
+    );
 }
 
+//TODO: Transfer comments?
 function remove_modifier<T extends ts.Modifier["kind"]>(modifiers: ts.ModifiersArray | undefined, target: T) : ts.ModifiersArray {
     if(!has_modifier(modifiers, target)) return modifiers;
 
@@ -121,8 +137,10 @@ function _generate(settings: _Settings, stack: StackParameters, layer: ts.Node[]
         case SyntaxKind.EndOfFileToken: /* oh no, we're at the end */
             break;
         default:
-            console.log("Unhandled type %s", SyntaxKind[node.kind]);
             //node.forEachChild(n => _generate(settings, stack, layer, n));
+            const sf = node.getSourceFile();
+            let { line, character } = sf ? sf.getLineAndCharacterOfPosition(node.getStart()) : {line: -1, character: -1};
+            console.log(`${(sf || {fileName: "unknown"}).fileName} (${line + 1},${character + 1}): Unhandled type %s`, SyntaxKind[node.kind]);
     }
 }
 
@@ -183,15 +201,7 @@ export function generate(file: ts.SourceFile, settings?: Settings) : ts.Node[]{
     return layer;
 }
 
-export function print(nodes: ts.Node[]) : string {
-    const dummy_file = ts.createSourceFile(
-        "dummy_file",
-        "",
-        ts.ScriptTarget.ES2016,
-        false,
-        ts.ScriptKind.TS
-    );
-
+export function print(source: ts.SourceFile, nodes: ts.Node[]) : string {
     const printer = ts.createPrinter({
         newLine: ts.NewLineKind.LineFeed
     });
@@ -199,7 +209,7 @@ export function print(nodes: ts.Node[]) : string {
     return printer.printList(
         ts.ListFormat.SpaceBetweenBraces | ts.ListFormat.MultiLine | ts.ListFormat.PreferNewLine,
         nodes as any,
-        dummy_file
+        source
     );
 }
 
@@ -325,7 +335,6 @@ generators[SyntaxKind.PropertySignature] = (settings, stack, node: ts.PropertySi
     if(!node.type)
         return node;
 
-    console.log(SyntaxKind[node.type.kind]);
     let type: ts.TypeNode = node.type;
     switch (node.type.kind) {
         case SyntaxKind.LiteralType:
@@ -374,28 +383,25 @@ generators[SyntaxKind.VariableStatement] = (settings, stack, node: ts.VariableSt
 };
 
 generators[SyntaxKind.TypeAliasDeclaration] = (settings, stack, node: ts.TypeAliasDeclaration) => {
+    if(stack.flag_namespace && !has_modifier(node.modifiers, SyntaxKind.ExportKeyword)) return;
+
     let type = node.type;
     if(type.kind == SyntaxKind.UnionType) {
         const union_members = [];
         const union = <ts.UnionTypeNode>node.type;
 
         for(const element of union.types as any as any[]) {
-            if(element.kind === SyntaxKind.LiteralType && element.literal && element.literal.text) {
-                union_members.push(ts.createStringLiteral(element.literal.text));
-            }
-            else
-                union_members.push(element);
-            console.log(SyntaxKind[element.kind]);
+            union_members.push(element);
         }
 
         type = ts.createUnionTypeNode(union_members);
     }
 
-    return ts.createTypeAliasDeclaration(node.decorators, node.modifiers, node.name, node.typeParameters, type);
+    return ts.createTypeAliasDeclaration(node.decorators, append_declare(node.modifiers, !stack.flag_declare), node.name, node.typeParameters, type);
 };
 
 generators[SyntaxKind.EnumMember] = (settings, stack, node: ts.EnumMember) => {
-    return ts.createEnumMember(node.name, undefined);
+    return ts.createEnumMember(node.name, node.initializer);
 };
 
 generators[SyntaxKind.EnumDeclaration] = (settings, stack, node: ts.EnumDeclaration) => {
@@ -403,4 +409,26 @@ generators[SyntaxKind.EnumDeclaration] = (settings, stack, node: ts.EnumDeclarat
     for(const member of node.members)
         members.push(generators[SyntaxKind.EnumMember](settings, stack, member));
     return ts.createEnumDeclaration(undefined, append_export(append_declare(node.modifiers, !stack.flag_declare), stack.flag_namespace), node.name, members);
+};
+
+generators[SyntaxKind.HeritageClause] = (settings, stack, node: ts.HeritageClause) => {
+    return undefined;
+};
+
+/* every variable in a block has no global scope! */
+generators[SyntaxKind.Block] = (settings, stack, node: ts.Block) => {
+    return undefined;
+};
+
+generators[SyntaxKind.IfStatement] = (settings, stack, node: ts.IfStatement) => {
+    return undefined;
+};
+
+/* Example for an ExpressionStatement would be: Modul["text"] = "XXX"; */
+generators[SyntaxKind.ExpressionStatement] = (settings, stack, node: ts.ExpressionStatement) => {
+    return undefined;
+};
+
+generators[SyntaxKind.SemicolonClassElement] = (settings, stack, node: ts.ExpressionStatement) => {
+    return undefined;
 };

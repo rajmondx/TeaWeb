@@ -1,6 +1,5 @@
 /// <reference path="channel.ts" />
 /// <reference path="modal/ModalChangeVolume.ts" />
-/// <reference path="modal/ModalServerGroupDialog.ts" />
 /// <reference path="client_move.ts" />
 
 enum ClientType {
@@ -26,6 +25,8 @@ class ClientProperties {
 
     client_channel_group_id: number = 0;
     client_lastconnected: number = 0;
+    client_created: number = 0;
+    client_totalconnections: number = 0;
 
     client_flag_avatar: string = "";
     client_icon_id: number = 0;
@@ -33,6 +34,7 @@ class ClientProperties {
     client_away_message: string = "";
     client_away: boolean = false;
 
+    client_country: string = "";
 
     client_input_hardware: boolean = false;
     client_output_hardware: boolean = false;
@@ -40,10 +42,70 @@ class ClientProperties {
     client_output_muted: boolean = false;
     client_is_channel_commander: boolean = false;
 
-    client_teaforum_id: number = 0;
-    client_teaforum_name: string = "";
+    client_teaforo_id: number = 0;
+    client_teaforo_name: string = "";
+    client_teaforo_flags: number = 0; /* 0x01 := Banned | 0x02 := Stuff | 0x04 := Premium */
+
+
+    /* not updated in view! */
+    client_month_bytes_uploaded: number = 0;
+    client_month_bytes_downloaded: number = 0;
+    client_total_bytes_uploaded: number = 0;
+    client_total_bytes_downloaded: number = 0;
 
     client_talk_power: number = 0;
+}
+
+class ClientConnectionInfo {
+    connection_bandwidth_received_last_minute_control: number = -1;
+    connection_bandwidth_received_last_minute_keepalive: number = -1;
+    connection_bandwidth_received_last_minute_speech: number = -1;
+    connection_bandwidth_received_last_second_control: number = -1;
+    connection_bandwidth_received_last_second_keepalive: number = -1;
+    connection_bandwidth_received_last_second_speech: number = -1;
+
+    connection_bandwidth_sent_last_minute_control: number = -1;
+    connection_bandwidth_sent_last_minute_keepalive: number = -1;
+    connection_bandwidth_sent_last_minute_speech: number = -1;
+    connection_bandwidth_sent_last_second_control: number = -1;
+    connection_bandwidth_sent_last_second_keepalive: number = -1;
+    connection_bandwidth_sent_last_second_speech: number = -1;
+
+    connection_bytes_received_control: number = -1;
+    connection_bytes_received_keepalive: number = -1;
+    connection_bytes_received_speech: number = -1;
+    connection_bytes_sent_control: number = -1;
+    connection_bytes_sent_keepalive: number = -1;
+    connection_bytes_sent_speech: number = -1;
+
+    connection_packets_received_control: number = -1;
+    connection_packets_received_keepalive: number = -1;
+    connection_packets_received_speech: number = -1;
+
+    connection_packets_sent_control: number = -1;
+    connection_packets_sent_keepalive: number = -1;
+    connection_packets_sent_speech: number = -1;
+
+    connection_ping: number = -1;
+    connection_ping_deviation: number = -1;
+
+    connection_server2client_packetloss_control: number = -1;
+    connection_server2client_packetloss_keepalive: number = -1;
+    connection_server2client_packetloss_speech: number = -1;
+    connection_server2client_packetloss_total: number = -1;
+
+    connection_client2server_packetloss_speech: number = -1;
+    connection_client2server_packetloss_keepalive: number = -1;
+    connection_client2server_packetloss_control: number = -1;
+    connection_client2server_packetloss_total: number = -1;
+
+    connection_filetransfer_bandwidth_sent: number = -1;
+    connection_filetransfer_bandwidth_received: number = -1;
+
+    connection_connected_time: number = -1;
+    connection_idle_time: number = -1;
+    connection_client_ip: string | undefined;
+    connection_client_port: number = -1;
 }
 
 class ClientEntry {
@@ -53,9 +115,20 @@ class ClientEntry {
 
     protected _properties: ClientProperties;
     protected lastVariableUpdate: number = 0;
-    protected _speaking: boolean = false;
+    protected _speaking: boolean;
     protected _listener_initialized: boolean;
+
     protected _audio_handle: connection.voice.VoiceClient;
+    protected _audio_volume: number;
+    protected _audio_muted: boolean;
+
+    private _info_variables_promise: Promise<void>;
+    private _info_variables_promise_timestamp: number;
+
+    private _info_connection_promise: Promise<ClientConnectionInfo>;
+    private _info_connection_promise_timestamp: number;
+    private _info_connection_promise_resolve: any;
+    private _info_connection_promise_reject: any;
 
     channelTree: ChannelTree;
 
@@ -67,10 +140,50 @@ class ClientEntry {
         this._channel = null;
     }
 
+    destroy() {
+        if(this._tag) {
+            this._tag.remove();
+            this._tag = undefined;
+        }
+        if(this._audio_handle) {
+            log.warn(LogCategory.AUDIO, tr("Destroying client with an active audio handle. This could cause memory leaks!"));
+            try {
+                this._audio_handle.abort_replay();
+            } catch(error) {
+                log.warn(LogCategory.AUDIO, tr("Failed to abort replay: %o"), error);
+            }
+            this._audio_handle.callback_playback = undefined;
+            this._audio_handle.callback_stopped = undefined;
+            this._audio_handle = undefined;
+        }
+
+        this._channel = undefined;
+    }
+
+    tree_unregistered() {
+        this.channelTree = undefined;
+        if(this._audio_handle) {
+            try {
+                this._audio_handle.abort_replay();
+            } catch(error) {
+                log.warn(LogCategory.AUDIO, tr("Failed to abort replay: %o"), error);
+            }
+            this._audio_handle.callback_playback = undefined;
+            this._audio_handle.callback_stopped = undefined;
+            this._audio_handle = undefined;
+        }
+
+        this._channel = undefined;
+    }
+
     set_audio_handle(handle: connection.voice.VoiceClient) {
         if(this._audio_handle === handle)
             return;
 
+        if(this._audio_handle) {
+            this._audio_handle.callback_playback = undefined;
+            this._audio_handle.callback_stopped = undefined;
+        }
         //TODO may ensure that the id is the same?
         this._audio_handle = handle;
         if(!handle) {
@@ -95,7 +208,42 @@ class ClientEntry {
     clientUid(){ return this.properties.client_unique_identifier; }
     clientId(){ return this._clientId; }
 
-    protected initializeListener(){
+    is_muted() { return !!this._audio_muted; }
+    set_muted(flag: boolean, update_icon: boolean, force?: boolean) {
+        if(this._audio_muted === flag && !force)
+            return;
+
+        if(flag) {
+            this.channelTree.client.serverConnection.send_command('clientmute', {
+                clid: this.clientId()
+            });
+        } else if(this._audio_muted) {
+            this.channelTree.client.serverConnection.send_command('clientunmute', {
+                clid: this.clientId()
+            });
+        }
+        this._audio_muted = flag;
+
+        this.channelTree.client.settings.changeServer("mute_client_" + this.clientUid(), flag);
+        if(this._audio_handle) {
+            if(flag) {
+                this._audio_handle.set_volume(0);
+            } else {
+                this._audio_handle.set_volume(this._audio_volume);
+            }
+        }
+
+        if(update_icon)
+            this.updateClientSpeakIcon();
+
+        for(const client of this.channelTree.clients) {
+            if(client === this || client.properties.client_unique_identifier != this.properties.client_unique_identifier)
+                continue;
+            client.set_muted(flag, true);
+        }
+    }
+
+    protected initializeListener() {
         if(this._listener_initialized) return;
         this._listener_initialized = true;
 
@@ -105,16 +253,12 @@ class ClientEntry {
             }
         });
 
-        this.tag.on('click', event => {
-            console.log("I've been clicked!");
-        });
-
         if(!(this instanceof LocalClientEntry) && !(this instanceof MusicClientEntry))
             this.tag.dblclick(event => {
                 if($.isArray(this.channelTree.currently_selected)) { //Multiselect
                     return;
                 }
-                this.chat(true).focus();
+                this.open_text_chat();
             });
 
         if(!settings.static(Settings.KEY_DISABLE_CONTEXT_MENU, false)) {
@@ -167,20 +311,34 @@ class ClientEntry {
         });
     }
 
-    protected assignment_context() : ContextMenuEntry[] {
-        let server_groups: ContextMenuEntry[] = [];
+    protected contextmenu_info() : contextmenu.MenuEntry[] {
+        return [
+            {
+                type: contextmenu.MenuEntryType.ENTRY,
+                name: this.properties.client_type_exact === ClientType.CLIENT_MUSIC ? tr("Show bot info") : tr("Show client info"),
+                callback: () => {
+                    this.channelTree.client.side_bar.show_client_info(this);
+                },
+                icon_class: "client-about",
+                visible: !settings.static_global(Settings.KEY_SWITCH_INSTANT_CLIENT)
+            }, {
+                callback: () => {},
+                type: contextmenu.MenuEntryType.HR,
+                name: "",
+                visible: !settings.static_global(Settings.KEY_SWITCH_INSTANT_CLIENT)
+            }
+        ]
+    }
+
+    protected assignment_context() : contextmenu.MenuEntry[] {
+        let server_groups: contextmenu.MenuEntry[] = [];
         for(let group of this.channelTree.client.groups.serverGroups.sort(GroupManager.sorter())) {
             if(group.type != GroupType.NORMAL) continue;
 
-            let entry: ContextMenuEntry = {} as any;
+            let entry: contextmenu.MenuEntry = {} as any;
 
-            {
-                let tag = $.spawn("label").addClass("checkbox");
-                $.spawn("input").attr("type", "checkbox").prop("checked", this.groupAssigned(group)).appendTo(tag);
-                $.spawn("span").addClass("checkmark").appendTo(tag);
-                entry.icon = tag;
-            }
-
+            //TODO: May add the server group icon?
+            entry.checkbox_checked = this.groupAssigned(group);
             entry.name = group.name + " [" + (group.properties.savedb ? "perm" : "tmp") + "]";
             if(this.groupAssigned(group)) {
                 entry.callback = () => {
@@ -199,21 +357,19 @@ class ClientEntry {
                 };
                 entry.disabled = !this.channelTree.client.permissions.neededPermission(PermissionType.I_GROUP_MEMBER_REMOVE_POWER).granted(group.requiredMemberAddPower);
             }
-            entry.type = MenuEntryType.ENTRY;
+            entry.type = contextmenu.MenuEntryType.CHECKBOX;
+
             server_groups.push(entry);
         }
 
-        let channel_groups: ContextMenuEntry[] = [];
+        let channel_groups: contextmenu.MenuEntry[] = [];
         for(let group of this.channelTree.client.groups.channelGroups.sort(GroupManager.sorter())) {
             if(group.type != GroupType.NORMAL) continue;
 
-            let entry: ContextMenuEntry = {} as any;
-            {
-                let tag = $.spawn("label").addClass("checkbox");
-                $.spawn("input").attr("type", "checkbox").prop("checked", this.assignedChannelGroup() == group.id).appendTo(tag);
-                $.spawn("span").addClass("checkmark").appendTo(tag);
-                entry.icon = tag;
-            }
+            let entry: contextmenu.MenuEntry = {} as any;
+
+            //TODO: May add the channel group icon?
+            entry.checkbox_checked = this.assignedChannelGroup() == group.id;
             entry.name = group.name + " [" + (group.properties.savedb ? "perm" : "tmp") + "]";
             entry.callback = () => {
                 this.channelTree.client.serverConnection.send_command("setclientchannelgroup", {
@@ -223,80 +379,118 @@ class ClientEntry {
                 });
             };
             entry.disabled = !this.channelTree.client.permissions.neededPermission(PermissionType.I_GROUP_MEMBER_ADD_POWER).granted(group.requiredMemberRemovePower);
-            entry.type = MenuEntryType.ENTRY;
+            entry.type = contextmenu.MenuEntryType.CHECKBOX;
             channel_groups.push(entry);
         }
 
         return [{
-            type: MenuEntryType.SUB_MENU,
-            icon: "client-permission_server_groups",
+            type: contextmenu.MenuEntryType.SUB_MENU,
+            icon_class: "client-permission_server_groups",
             name: tr("Set server group"),
             sub_menu: [
                 {
-                    type: MenuEntryType.ENTRY,
-                    icon: "client-permission_server_groups",
+                    type: contextmenu.MenuEntryType.ENTRY,
+                    icon_class: "client-permission_server_groups",
                     name: "Server groups dialog",
-                    callback: () => {
-                        Modals.createServerGroupAssignmentModal(this, (group, flag) => {
-                            if(flag) {
-                                return this.channelTree.client.serverConnection.send_command("servergroupaddclient", {
-                                    sgid: group.id,
-                                    cldbid: this.properties.client_database_id
-                                }).then(result => true);
-                            } else
-                                return this.channelTree.client.serverConnection.send_command("servergroupdelclient", {
-                                    sgid: group.id,
-                                    cldbid: this.properties.client_database_id
-                                }).then(result => true);
-                        });
-                    }
+                    callback: () => this.open_assignment_modal()
                 },
-                MenuEntry.HR(),
+                contextmenu.Entry.HR(),
                 ...server_groups
             ]
         },{
-            type: MenuEntryType.SUB_MENU,
-            icon: "client-permission_channel",
+            type: contextmenu.MenuEntryType.SUB_MENU,
+            icon_class: "client-permission_channel",
             name: tr("Set channel group"),
             sub_menu: [
                 ...channel_groups
             ]
         },{
-            type: MenuEntryType.SUB_MENU,
-            icon: "client-permission_client",
+            type: contextmenu.MenuEntryType.SUB_MENU,
+            icon_class: "client-permission_client",
             name: tr("Permissions"),
-            disabled: true,
-            sub_menu: [ ]
+            sub_menu: [
+                {
+                    type: contextmenu.MenuEntryType.ENTRY,
+                    icon_class: "client-permission_client",
+                    name: tr("Client permissions"),
+                    callback: () => Modals.spawnPermissionEdit(this.channelTree.client, "clp", {unique_id: this.clientUid()}).open()
+                },
+                {
+                    type: contextmenu.MenuEntryType.ENTRY,
+                    icon_class: "client-permission_client",
+                    name: tr("Client channel permissions"),
+                    callback: () => Modals.spawnPermissionEdit(this.channelTree.client, "clchp", {unique_id: this.clientUid(), channel_id: this._channel ? this._channel.channelId : undefined }).open()
+                }
+            ]
         }];
+    }
+
+    open_assignment_modal() {
+        Modals.createServerGroupAssignmentModal(this, (groups, flag) => {
+            if(groups.length == 0) return Promise.resolve(true);
+
+            if(groups.length == 1) {
+                if(flag) {
+                    return this.channelTree.client.serverConnection.send_command("servergroupaddclient", {
+                        sgid: groups[0],
+                        cldbid: this.properties.client_database_id
+                    }).then(result => true);
+                } else
+                    return this.channelTree.client.serverConnection.send_command("servergroupdelclient", {
+                        sgid: groups[0],
+                        cldbid: this.properties.client_database_id
+                    }).then(result => true);
+            } else {
+                const data = groups.map(e => { return {sgid: e}; });
+                data[0]["cldbid"] = this.properties.client_database_id;
+
+                if(flag) {
+                    return this.channelTree.client.serverConnection.send_command("clientaddservergroup", data, {flagset: ["continueonerror"]}).then(result => true);
+                } else
+                    return this.channelTree.client.serverConnection.send_command("clientdelservergroup", data, {flagset: ["continueonerror"]}).then(result => true);
+            }
+        });
+    }
+
+    open_text_chat() {
+        const chat = this.channelTree.client.side_bar;
+        const conversation = chat.private_conversations().find_conversation({
+            name: this.clientNickName(),
+            client_id: this.clientId(),
+            unique_id: this.clientUid()
+        }, {
+            attach: true,
+            create: true
+        });
+        chat.private_conversations().set_selected_conversation(conversation);
+        chat.show_private_conversations();
+        chat.private_conversations().try_input_focus();
     }
 
     showContextMenu(x: number, y: number, on_close: () => void = undefined) {
         let trigger_close = true;
-        spawn_context_menu(x, y,
-            {
-                type: MenuEntryType.ENTRY,
-                name: tr("Show client info"),
+        contextmenu.spawn_context_menu(x, y,
+            ...this.contextmenu_info(), {
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-change_nickname",
+                name:   (contextmenu.get_provider().html_format_enabled() ? "<b>" : "") +
+                        tr("Open text chat") +
+                        (contextmenu.get_provider().html_format_enabled() ? "</b>" : ""),
                 callback: () => {
-                    trigger_close = false;
-                    this.channelTree.client.select_info.open_popover()
-                },
-                icon: "client-about",
-                visible: this.channelTree.client.select_info.is_popover()
-            }, {
-                type: MenuEntryType.HR,
-                visible: this.channelTree.client.select_info.is_popover(),
-                name: ''
-            }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-change_nickname",
-                name: tr("<b>Open text chat</b>"),
-                callback: () => {
-                    this.channelTree.client.chat.activeChat = this.chat(true);
-                    this.channelTree.client.chat.focus();
+                    this.open_text_chat();
                 }
-            }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-poke",
+            },
+            contextmenu.Entry.HR(),
+            {
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-about",
+                name: tr("Show client info"),
+                callback: () => Modals.openClientInfo(this)
+            },
+            contextmenu.Entry.HR(),
+            {
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-poke",
                 name: tr("Poke client"),
                 callback: () => {
                     createInputModal(tr("Poke client"), tr("Poke message:<br>"), text => true, result => {
@@ -312,8 +506,8 @@ class ClientEntry {
                     }, { width: 400, maxLength: 512 }).open();
                 }
             }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-edit",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-edit",
                 name: tr("Change description"),
                 callback: () => {
                     createInputModal(tr("Change client description"), tr("New description:<br>"), text => true, result => {
@@ -329,11 +523,11 @@ class ClientEntry {
                     }, { width: 400, maxLength: 1024 }).open();
                 }
             },
-            MenuEntry.HR(),
+            contextmenu.Entry.HR(),
             ...this.assignment_context(),
-            MenuEntry.HR(), {
-                type: MenuEntryType.ENTRY,
-                icon: "client-move_client_to_own_channel",
+            contextmenu.Entry.HR(), {
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-move_client_to_own_channel",
                 name: tr("Move client to your channel"),
                 callback: () => {
                     this.channelTree.client.serverConnection.send_command("clientmove", {
@@ -342,8 +536,8 @@ class ClientEntry {
                     });
                 }
             }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-kick_channel",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-kick_channel",
                 name: tr("Kick client from channel"),
                 callback: () => {
                     createInputModal(tr("Kick client from channel"), tr("Kick reason:<br>"), text => true, result => {
@@ -360,8 +554,8 @@ class ClientEntry {
                     }, { width: 400, maxLength: 255 }).open();
                 }
             }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-kick_server",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-kick_server",
                 name: tr("Kick client fom server"),
                 callback: () => {
                     createInputModal(tr("Kick client from server"), tr("Kick reason:<br>"), text => true, result => {
@@ -378,12 +572,15 @@ class ClientEntry {
                     }, { width: 400, maxLength: 255 }).open();
                 }
             }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-ban_client",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-ban_client",
                 name: tr("Ban client"),
                 invalidPermission: !this.channelTree.client.permissions.neededPermission(PermissionType.I_CLIENT_BAN_MAX_BANTIME).granted(1),
                 callback: () => {
-                    Modals.spawnBanClient(this.properties.client_nickname, (data) => {
+                    Modals.spawnBanClient(this.channelTree.client, [{
+                        name: this.properties.client_nickname,
+                        unique_id: this.properties.client_unique_identifier
+                    }], (data) => {
                         this.channelTree.client.serverConnection.send_command("banclient", {
                             uid: this.properties.client_unique_identifier,
                             banreason: data.reason,
@@ -396,7 +593,7 @@ class ClientEntry {
                     });
                 }
             },
-            MenuEntry.HR(),
+            contextmenu.Entry.HR(),
             /*
             {
                 type: MenuEntryType.ENTRY,
@@ -416,19 +613,32 @@ class ClientEntry {
             MenuEntry.HR(),
             */
             {
-                type: MenuEntryType.ENTRY,
-                icon: "client-volume",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-volume",
                 name: tr("Change Volume"),
                 callback: () => {
-                    Modals.spawnChangeVolume(this._audio_handle.get_volume(), volume => {
+                    Modals.spawnChangeVolume(this, true, this._audio_volume, undefined, volume => {
+                        this._audio_volume = volume;
                         this.channelTree.client.settings.changeServer("volume_client_" + this.clientUid(), volume);
-                        this._audio_handle.set_volume(volume);
-                        if(this.channelTree.client.select_info.currentSelected == this)
-                            this.channelTree.client.select_info.update();
+                        if(this._audio_handle)
+                            this._audio_handle.set_volume(volume);
+                        //TODO: Update in info
                     });
                 }
+            }, {
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-input_muted_local",
+                name: tr("Mute client"),
+                visible: !this._audio_muted,
+                callback: () => this.set_muted(true, true)
+            }, {
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-input_muted_local",
+                name: tr("Unmute client"),
+                visible: this._audio_muted,
+                callback: () => this.set_muted(false, true)
             },
-            MenuEntry.CLOSE(() => (trigger_close ? on_close : () => {})())
+            contextmenu.Entry.CLOSE(() => trigger_close ? on_close() : {})
         );
     }
 
@@ -440,6 +650,14 @@ class ClientEntry {
             .attr("client-id", this.clientId());
 
 
+        /* unread marker */
+        {
+            container_client.append(
+                $.spawn("div")
+                    .addClass("marker-text-unread hidden")
+                    .attr("private-conversation", this._clientId)
+            );
+        }
         container_client.append(
             $.spawn("div")
             .addClass("icon_client_state")
@@ -513,7 +731,7 @@ class ClientEntry {
     }
 
     set speaking(flag) {
-        if(flag == this._speaking) return;
+        if(flag === this._speaking) return;
         this._speaking = flag;
         this.updateClientSpeakIcon();
     }
@@ -534,8 +752,10 @@ class ClientEntry {
             icon = "client-server_query";
             console.log("Server query!");
         } else {
-            if(this.properties.client_away) {
+            if (this.properties.client_away) {
                 icon = "client-away";
+            } else if (this._audio_muted && !(this instanceof LocalClientEntry)) {
+                icon = "client-input_muted_local";
             } else if(!this.properties.client_output_hardware) {
                 icon = "client-hardware_output_muted";
             } else if(this.properties.client_output_muted) {
@@ -585,6 +805,7 @@ class ClientEntry {
         let update_icon_speech = false;
         let update_away = false;
         let reorder_channel = false;
+        let update_avatar = false;
 
         {
             const entries = [];
@@ -594,17 +815,38 @@ class ClientEntry {
                     value: variable.value,
                     type: typeof (this.properties[variable.key])
                 });
-            log.table("Client update properties", entries);
+            log.table(LogType.DEBUG, LogCategory.PERMISSIONS, "Client update properties", entries);
         }
 
         for(const variable of variables) {
+            const old_value = this._properties[variable.key];
             JSON.map_field_to(this._properties, variable.value, variable.key);
 
             if(variable.key == "client_nickname") {
-                this.tag.find(".client-name").text(variable.value);
-                let chat = this.chat(false);
-                if(chat) chat.name = variable.value;
+                if(variable.value !== old_value && typeof(old_value) === "string") {
+                    if(!(this instanceof LocalClientEntry)) { /* own changes will be logged somewhere else */
+                        this.channelTree.client.log.log(log.server.Type.CLIENT_NICKNAME_CHANGED, {
+                            own_client: false,
+                            client: this.log_data(),
+                            new_name: variable.value,
+                            old_name: old_value
+                        });
+                    }
+                }
 
+                this.tag.find(".client-name").text(variable.value);
+
+                const chat = this.channelTree.client.side_bar;
+                const conversation = chat.private_conversations().find_conversation({
+                    name: this.clientNickName(),
+                    client_id: this.clientId(),
+                    unique_id: this.clientUid()
+                }, {
+                    attach: false,
+                    create: false
+                });
+                if(conversation)
+                    conversation.set_client_name(variable.value);
                 reorder_channel = true;
             }
             if(
@@ -620,22 +862,32 @@ class ClientEntry {
                 update_away = true;
             }
             if(variable.key == "client_unique_identifier") {
-                if(this._audio_handle) {
-                    const volume = parseFloat(this.channelTree.client.settings.server("volume_client_" + this.clientUid(), "1"));
-                    this._audio_handle.set_volume(volume);
-                    log.debug(LogCategory.CLIENT, tr("Loaded client volume %d for client %s from config."), volume, this.clientUid());
-                } else {
-                    log.warn(LogCategory.CLIENT, tr("Visible client got unique id assigned, but hasn't yet an audio handle. Ignoring volume assignment."));
-                }
+                this._audio_volume = parseFloat(this.channelTree.client.settings.server("volume_client_" + this.clientUid(), "1"));
+                const mute_status = this.channelTree.client.settings.server("mute_client_" + this.clientUid(), false);
+                this.set_muted(mute_status, false, mute_status); /* force only needed when we want to mute the client */
+
+                if(this._audio_handle)
+                    this._audio_handle.set_volume(this._audio_muted ? 0 : this._audio_volume);
+
+                update_icon_speech = true;
+                log.debug(LogCategory.CLIENT, tr("Loaded client (%s) server specific properties. Volume: %o Muted: %o."), this.clientUid(), this._audio_volume, this._audio_muted);
             }
             if(variable.key == "client_talk_power") {
                 reorder_channel = true;
                 update_icon_status = true;
             }
-            if(variable.key == "client_icon_id")
+            if(variable.key == "client_icon_id") {
+                /* yeah we like javascript. Due to JS wiered integer behaviour parsing for example fails for 18446744073409829863.
+                *  parseInt("18446744073409829863") evaluates to  18446744073409829000.
+                *  In opposite "18446744073409829863" >>> 0 evaluates to 3995244544, which is the icon id :)
+                */
+                this.properties.client_icon_id = variable.value as any >>> 0;
                 this.updateClientIcon();
+            }
             if(variable.key =="client_channel_group_id" || variable.key == "client_servergroups")
                 this.update_displayed_client_groups();
+            else if(variable.key == "client_flag_avatar")
+                update_avatar = true;
         }
 
         /* process updates after variables have been set */
@@ -648,15 +900,30 @@ class ClientEntry {
         if(update_away)
             this.updateAwayMessage();
 
+        const side_bar = this.channelTree.client.side_bar;
+        {
+            const client_info = side_bar.client_info();
+            if(client_info.current_client() === this)
+                client_info.set_current_client(this, true); /* force an update */
+        }
+        if(update_avatar) {
+            this.channelTree.client.fileManager.avatars.update_cache(this.avatarId(), this.properties.client_flag_avatar);
+
+            const conversations = side_bar.private_conversations();
+            const conversation = conversations.find_conversation({name: this.clientNickName(), unique_id: this.clientUid(), client_id: this.clientId()}, {create: false, attach: false});
+            if(conversation)
+                conversation.update_avatar();
+        }
+
         group.end();
     }
 
     update_displayed_client_groups() {
-        this.tag.find(".container-icons-group").children().detach();
+        this.tag.find(".container-icons-group").children().remove();
 
         for(let id of this.assignedServerGroupIds())
             this.updateGroupIcon(this.channelTree.client.groups.serverGroup(id));
-
+        this.update_group_icon_order();
         this.updateGroupIcon(this.channelTree.client.groups.channelGroup(this.properties.client_channel_group_id));
 
         let prefix_groups: string[] = [];
@@ -686,39 +953,21 @@ class ClientEntry {
         }
     }
 
-    updateClientVariables(){
-        if(this.lastVariableUpdate == 0 || new Date().getTime() - 10 * 60 * 1000 > this.lastVariableUpdate){ //Cache these only 10 min
-            this.lastVariableUpdate = new Date().getTime();
-            this.channelTree.client.serverConnection.send_command("clientgetvariables", {clid: this.clientId()});
-        }
-    }
+    updateClientVariables(force_update?: boolean) : Promise<void> {
+        if(Date.now() - 10 * 60 * 1000 < this._info_variables_promise_timestamp && this._info_variables_promise && (typeof(force_update) !== "boolean" || force_update))
+            return this._info_variables_promise;
 
-    chat(create: boolean = false) : ChatEntry {
-        let chatName = "client_" + this.clientUid() + ":" + this.clientId();
-        let chat = this.channelTree.client.chat.findChat(chatName);
-        if(!chat && create) {
-            chat = this.channelTree.client.chat.createChat(chatName);
-            chat.flag_closeable = true;
-            chat.name = this.clientNickName();
-            chat.owner_unique_id = this.properties.client_unique_identifier;
-
-            chat.onMessageSend = text => {
-                this.channelTree.client.serverConnection.command_helper.sendMessage(text, ChatType.CLIENT, this);
-            };
-
-            chat.onClose = () => {
-                if(!chat.flag_offline)
-                    this.channelTree.client.serverConnection.send_command("clientchatclosed", {"clid": this.clientId()}, {process_result: false}).catch(error => {
-                        log.warn(LogCategory.GENERAL, tr("Failed to notify chat participant (%o) that the chat has been closed. Error: %o"), this, error);
-                    });
-                return true;
-            }
-        }
-        return chat;
+        this._info_variables_promise_timestamp = Date.now();
+        return (this._info_variables_promise = new Promise<void>((resolve, reject) => {
+            this.channelTree.client.serverConnection.send_command("clientgetvariables", {clid: this.clientId()}).then(() => resolve()).catch(error => {
+                this._info_connection_promise_timestamp = 0; /* not succeeded */
+                reject(error);
+            });
+        }));
     }
 
     updateClientIcon() {
-        this.tag.find(".container-icon-client").children().detach();
+        this.tag.find(".container-icon-client").children().remove();
         if(this.properties.client_icon_id > 0) {
             this.channelTree.client.fileManager.icons.generateTag(this.properties.client_icon_id).attr("title", "Client icon")
                 .appendTo(this.tag.find(".container-icon-client"));
@@ -727,16 +976,23 @@ class ClientEntry {
 
     updateGroupIcon(group: Group) {
         if(!group) return;
-        //TODO group icon order
-        this.tag.find(".container-icons-group .icon_group_" + group.id).detach();
+
+        const container = this.tag.find(".container-icons-group");
+        container.find(".icon_group_" + group.id).remove();
 
         if (group.properties.iconid > 0) {
-            this.tag.find(".container-icons-group").append(
-                $.spawn("div")
+            container.append(
+                $.spawn("div").attr('group-power', group.properties.sortid)
                     .addClass("container-group-icon icon_group_" + group.id)
                     .append(this.channelTree.client.fileManager.icons.generateTag(group.properties.iconid)).attr("title", group.name)
             );
         }
+    }
+
+    update_group_icon_order() {
+        const container = this.tag.find(".container-icons-group");
+
+        container.append(...[...container.children()].sort((a, b) => parseInt(a.getAttribute("group-power")) - parseInt(b.getAttribute("group-power"))));
     }
 
     assignedServerGroupIds() : number[] {
@@ -802,7 +1058,47 @@ class ClientEntry {
         if(!this._channel) return;
         const index = this._channel.calculate_family_index();
 
-        this.tag.css('padding-left', (index + 2) * 16 + "px");
+        this.tag.css('padding-left', (5 + (index + 2) * 16) + "px");
+    }
+
+    log_data() : log.server.base.Client {
+        return {
+            client_unique_id: this.properties.client_unique_identifier,
+            client_name: this.clientNickName(),
+            client_id: this._clientId
+        }
+    }
+
+    /* max 1s ago, so we could update every second */
+    request_connection_info() : Promise<ClientConnectionInfo> {
+        if(Date.now() - 900 < this._info_connection_promise_timestamp && this._info_connection_promise)
+            return this._info_connection_promise;
+
+        if(this._info_connection_promise_reject)
+            this._info_connection_promise_resolve("timeout");
+
+        let _local_reject; /* to ensure we're using the right resolve! */
+        this._info_connection_promise = new Promise<ClientConnectionInfo>((resolve, reject) => {
+            this._info_connection_promise_resolve = resolve;
+            this._info_connection_promise_reject = reject;
+            _local_reject = reject;
+        });
+
+        this._info_connection_promise_timestamp = Date.now();
+        this.channelTree.client.serverConnection.send_command("getconnectioninfo", {clid: this._clientId}).catch(error => _local_reject(error));
+        return this._info_connection_promise;
+    }
+
+    set_connection_info(info: ClientConnectionInfo) {
+        if(!this._info_connection_promise_resolve)
+            return;
+        this._info_connection_promise_resolve(info);
+        this._info_connection_promise_resolve = undefined;
+        this._info_connection_promise_reject = undefined;
+    }
+
+    set flag_text_unread(flag: boolean) {
+        this._tag.find(".marker-text-unread").toggleClass("hidden", !flag);
     }
 }
 
@@ -819,15 +1115,18 @@ class LocalClientEntry extends ClientEntry {
     showContextMenu(x: number, y: number, on_close: () => void = undefined): void {
         const _self = this;
 
-        spawn_context_menu(x, y,
-            {
-                name: tr("<b>Change name</b>"),
-                icon: "client-change_nickname",
+        contextmenu.spawn_context_menu(x, y,
+            ...this.contextmenu_info(), {
+
+                name:   (contextmenu.get_provider().html_format_enabled() ? "<b>" : "") +
+                        tr("Change name") +
+                        (contextmenu.get_provider().html_format_enabled() ? "</b>" : ""),
+                icon_class: "client-change_nickname",
                 callback: () =>_self.openRename(),
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             }, {
                 name: tr("Change description"),
-                icon: "client-edit",
+                icon_class: "client-edit",
                 callback: () => {
                     createInputModal(tr("Change own description"), tr("New description:<br>"), text => true, result => {
                         if(result) {
@@ -840,20 +1139,23 @@ class LocalClientEntry extends ClientEntry {
                         }
                     }, { width: 400, maxLength: 1024 }).open();
                 },
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             },
-            MenuEntry.HR(),
+            contextmenu.Entry.HR(),
             ...this.assignment_context(),
-            MenuEntry.CLOSE(on_close)
+            contextmenu.Entry.CLOSE(on_close)
         );
     }
 
     initializeListener(): void {
+        if(this._listener_initialized)
+            this.tag.off();
+        this._listener_initialized = false; /* could there be a better system */
         super.initializeListener();
         this.tag.find(".client-name").addClass("client-name-own");
 
-        this.tag.dblclick(() => {
-            if($.isArray(this.channelTree.currently_selected)) { //Multiselect
+        this.tag.on('dblclick', () => {
+            if(Array.isArray(this.channelTree.currently_selected)) { //Multiselect
                 return;
             }
             this.openRename();
@@ -861,38 +1163,49 @@ class LocalClientEntry extends ClientEntry {
     }
 
     openRename() : void {
-        const _self = this;
+        this.channelTree.client_mover.enabled = false;
 
         const elm = this.tag.find(".client-name");
         elm.attr("contenteditable", "true");
         elm.removeClass("client-name-own");
         elm.css("background-color", "white");
         elm.focus();
-        _self.renaming = true;
+        this.renaming = true;
 
-        elm.keypress(function (e) {
-            if(e.keyCode == JQuery.Key.Enter) {
-                $(this).trigger("focusout");
+        elm.on('keypress', event => {
+            if(event.keyCode == KeyCode.KEY_RETURN) {
+                $(event.target).trigger("focusout");
                 return false;
             }
         });
 
-        elm.focusout(e => {
-            if(!_self.renaming) return;
-            _self.renaming = false;
+        elm.on('focusout', event => {
+            this.channelTree.client_mover.enabled = true;
+
+            if(!this.renaming) return;
+            this.renaming = false;
 
             elm.css("background-color", "");
             elm.removeAttr("contenteditable");
             elm.addClass("client-name-own");
             let text = elm.text().toString();
-            if(_self.clientNickName() == text) return;
+            if(this.clientNickName() == text) return;
 
-            elm.text(_self.clientNickName());
-            _self.handle.serverConnection.command_helper.updateClient("client_nickname", text).then((e) => {
-                this.channelTree.client.chat.serverChat().appendMessage(tr("Nickname successfully changed"));
+            elm.text(this.clientNickName());
+            const old_name = this.clientNickName();
+            this.handle.serverConnection.command_helper.updateClient("client_nickname", text).then((e) => {
+                settings.changeGlobal(Settings.KEY_CONNECT_USERNAME, text);
+                this.channelTree.client.log.log(log.server.Type.CLIENT_NICKNAME_CHANGED, {
+                    client: this.log_data(),
+                    old_name: old_name,
+                    new_name: text,
+                    own_client: true
+                });
             }).catch((e: CommandResult) => {
-                this.channelTree.client.chat.serverChat().appendError(tr("Could not change nickname ({})"),  e.extra_message);
-                _self.openRename();
+                this.channelTree.client.log.log(log.server.Type.CLIENT_NICKNAME_CHANGE_FAILED, {
+                    reason: e.extra_message
+                });
+                this.openRename();
             });
         });
     }
@@ -937,29 +1250,25 @@ class MusicClientEntry extends ClientEntry {
         super(clientId, clientName, new MusicClientProperties());
     }
 
+    destroy() {
+        super.destroy();
+        this._info_promise = undefined;
+        this._info_promise_reject = undefined;
+        this._info_promise_resolve = undefined;
+    }
+
     get properties() : MusicClientProperties {
         return this._properties as MusicClientProperties;
     }
 
     showContextMenu(x: number, y: number, on_close: () => void = undefined): void {
         let trigger_close = true;
-        spawn_context_menu(x, y,
-            {
-                type: MenuEntryType.ENTRY,
-                name: tr("Show bot info"),
-                callback: () => {
-                    trigger_close = false;
-                    this.channelTree.client.select_info.open_popover()
-                },
-                icon: "client-about",
-                visible: this.channelTree.client.select_info.is_popover()
-            }, {
-                type: MenuEntryType.HR,
-                visible: this.channelTree.client.select_info.is_popover(),
-                name: ''
-            }, {
-                name: tr("<b>Change bot name</b>"),
-                icon: "client-change_nickname",
+        contextmenu.spawn_context_menu(x, y,
+            ...this.contextmenu_info(), {
+                name: (contextmenu.get_provider().html_format_enabled() ? "<b>" : "") +
+                      tr("Change bot name") +
+                      (contextmenu.get_provider().html_format_enabled() ? "</b>" : ""),
+                icon_class: "client-change_nickname",
                 disabled: false,
                 callback: () => {
                     createInputModal(tr("Change music bots nickname"), tr("New nickname:<br>"), text => text.length >= 3 && text.length <= 31, result => {
@@ -970,12 +1279,12 @@ class MusicClientEntry extends ClientEntry {
                             });
 
                         }
-                    }, { width: 400, maxLength: 255 }).open();
+                    }, { width: "40em", min_width: "10em", maxLength: 255 }).open();
                 },
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             }, {
                 name: tr("Change bot description"),
-                icon: "client-edit",
+                icon_class: "client-edit",
                 disabled: false,
                 callback: () => {
                     createInputModal(tr("Change music bots description"), tr("New description:<br>"), text => true, result => {
@@ -986,9 +1295,9 @@ class MusicClientEntry extends ClientEntry {
                             });
 
                         }
-                    }, { width: 400, maxLength: 255 }).open();
+                    }, { width: "60em", min_width: "10em", maxLength: 255 }).open();
                 },
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             },
             /*
             {
@@ -1001,7 +1310,7 @@ class MusicClientEntry extends ClientEntry {
             */
             {
                 name: tr("Open bot's playlist"),
-                icon: "client-edit",
+                icon_class: "client-edit",
                 disabled: false,
                 callback: () => {
                     this.channelTree.client.serverConnection.command_helper.request_playlist_list().then(lists => {
@@ -1016,11 +1325,11 @@ class MusicClientEntry extends ClientEntry {
                         createErrorModal(tr("Failed to query playlist."), tr("Failed to query playlist info.")).open();
                     });
                 },
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             },
             {
                 name: tr("Quick url replay"),
-                icon: "client-edit",
+                icon_class: "client-edit",
                 disabled: false,
                 callback: () => {
                     createInputModal(tr("Please enter the URL"), tr("URL:"), text => true, result => {
@@ -1039,13 +1348,13 @@ class MusicClientEntry extends ClientEntry {
                         }
                     }, { width: 400, maxLength: 255 }).open();
                 },
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             },
-            MenuEntry.HR(),
+            contextmenu.Entry.HR(),
             ...super.assignment_context(),
-            MenuEntry.HR(),{
-                type: MenuEntryType.ENTRY,
-                icon: "client-move_client_to_own_channel",
+            contextmenu.Entry.HR(),{
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-move_client_to_own_channel",
                 name: tr("Move client to your channel"),
                 callback: () => {
                     this.channelTree.client.serverConnection.send_command("clientmove", {
@@ -1054,8 +1363,8 @@ class MusicClientEntry extends ClientEntry {
                     });
                 }
             }, {
-                type: MenuEntryType.ENTRY,
-                icon: "client-kick_channel",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-kick_channel",
                 name: tr("Kick client from channel"),
                 callback: () => {
                     createInputModal(tr("Kick client from channel"), tr("Kick reason:<br>"), text => true, result => {
@@ -1070,44 +1379,44 @@ class MusicClientEntry extends ClientEntry {
                     }, { width: 400, maxLength: 255 }).open();
                 }
             },
-            MenuEntry.HR(),
+            contextmenu.Entry.HR(),
             {
-                type: MenuEntryType.ENTRY,
-                icon: "client-volume",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-volume",
                 name: tr("Change local volume"),
                 callback: () => {
-                    Modals.spawnChangeVolume(this._audio_handle.get_volume(), volume => {
+                    Modals.spawnChangeVolume(this, true, this._audio_handle.get_volume(), undefined, volume => {
                         this.channelTree.client.settings.changeServer("volume_client_" + this.clientUid(), volume);
                         this._audio_handle.set_volume(volume);
-                        if(this.channelTree.client.select_info.currentSelected == this)
-                            (<MusicInfoManager>this.channelTree.client.select_info.current_manager()).update_local_volume(volume);
                     });
                 }
             },
             {
-                type: MenuEntryType.ENTRY,
-                icon: "client-volume",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-volume",
                 name: tr("Change remote volume"),
                 callback: () => {
                     let max_volume = this.channelTree.client.permissions.neededPermission(PermissionType.I_CLIENT_MUSIC_CREATE_MODIFY_MAX_VOLUME).value;
                     if(max_volume < 0)
                         max_volume = 100;
 
-                    Modals.spawnChangeRemoteVolume(this.properties.player_volume, max_volume / 100, value => {
+                    Modals.spawnChangeVolume(this, false, this.properties.player_volume, max_volume / 100, value => {
+                        if(typeof(value) !== "number")
+                            return;
+
                         this.channelTree.client.serverConnection.send_command("clientedit", {
                             clid: this.clientId(),
                             player_volume: value,
                         }).then(() => {
-                            if(this.channelTree.client.select_info.currentSelected == this)
-                                (<MusicInfoManager>this.channelTree.client.select_info.current_manager()).update_remote_volume(value);
+                            //TODO: Update in info
                         });
                     });
                 }
             },
-            MenuEntry.HR(),
+            contextmenu.Entry.HR(),
             {
                 name: tr("Delete bot"),
-                icon: "client-delete",
+                icon_class: "client-delete",
                 disabled: false,
                 callback: () => {
                     const tag = $.spawn("div").append(MessageHelper.formatMessage(tr("Do you really want to delete {0}"), this.createChatTag(false)));
@@ -1119,9 +1428,9 @@ class MusicClientEntry extends ClientEntry {
                        }
                     });
                 },
-                type: MenuEntryType.ENTRY
+                type: contextmenu.MenuEntryType.ENTRY
             },
-            MenuEntry.CLOSE(() => (trigger_close ? on_close : () => {})())
+            contextmenu.Entry.CLOSE(() => trigger_close && on_close())
         );
     }
 
@@ -1131,7 +1440,8 @@ class MusicClientEntry extends ClientEntry {
 
     handlePlayerInfo(json) {
         if(json) {
-            let info = JSON.map_to(new MusicClientPlayerInfo(), json);
+            const info = new MusicClientPlayerInfo();
+           JSON.map_to(info, json);
             if(this._info_promise_resolve)
                 this._info_promise_resolve(info);
             this._info_promise_reject = undefined;

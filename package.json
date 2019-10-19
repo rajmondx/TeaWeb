@@ -1,36 +1,38 @@
 {
   "name": "client",
-  "version": "1.0.1",
+  "version": "1.2.0",
   "description": "Welcome here! This repository is created with two reasons:\n 1. People can bring their own ideas and follow their implementation\n 2. People can see TeaSpeak Web client progress and avoid creating repetitive issues all the time.",
   "main": "main.js",
   "directories": {},
   "scripts": {
     "compile-sass": "sass --update .:.",
-    "build-worker-codec": "tsc -p shared/js/workers/tsconfig_worker_codec.json",
+    "build-worker-codec": "tsc -p web/js/workers/tsconfig_worker_codec.json",
     "build-worker-pow": "tsc -p shared/js/workers/tsconfig_worker_pow.json",
     "build-worker": "npm run build-worker-codec; npm run build-worker-pow;",
     "dtsgen": "node tools/dtsgen/index.js",
     "trgen": "node tools/trgen/index.js",
     "ttsc": "ttsc",
     "csso": "csso",
-    "rebuild-structure-web-dev": "php files.php generate web dev"
+    "rebuild-structure-web-dev": "php files.php generate web dev",
+    "minify-web-rel-file": "terser --compress --mangle --ecma 6 --keep_classnames --keep_fnames --output"
   },
   "author": "TeaSpeak (WolverinDEV)",
   "license": "ISC",
   "devDependencies": {
-    "@types/emscripten": "0.0.31",
-    "@types/jquery": "3.3.5",
+    "@types/emscripten": "^1.38.0",
+    "@types/jquery": "^3.3.31",
     "@types/moment": "^2.13.0",
-    "@types/node": "^9.4.6",
+    "@types/node": "^12.7.2",
     "@types/sha256": "^0.2.0",
-    "@types/websocket": "0.0.38",
+    "@types/websocket": "0.0.40",
+    "clean-css": "^4.2.1",
     "csso-cli": "^2.0.2",
-    "electron": "^3.0.2",
-    "gulp": "^3.9.1",
-    "sass": "^1.14.1",
+    "gulp": "^4.0.2",
+    "sass": "^1.22.10",
     "sha256": "^0.2.0",
-    "ttypescript": "1.5.5",
-    "typescript": "^3.1.1",
+    "terser": "^4.2.1",
+    "ttypescript": "^1.5.7",
+    "typescript": "^3.5.3",
     "wat2wasm": "^1.0.2"
   },
   "repository": {
@@ -40,8 +42,5 @@
   "bugs": {
     "url": "https://github.com/TeaSpeak/TeaWeb/issues"
   },
-  "homepage": "https://www.teaspeak.de",
-  "dependencies": {
-    "clean-css": "^4.2.1"
-  }
+  "homepage": "https://www.teaspeak.de"
 }

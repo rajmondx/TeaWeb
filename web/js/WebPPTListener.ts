@@ -1,5 +1,6 @@
 /// <reference path="../declarations/imports_shared.d.ts"/>
 
+
 namespace ppt {
     interface WebKeyEvent extends KeyEvent {
         canceled: boolean;
@@ -38,6 +39,7 @@ namespace ppt {
         document.addEventListener('keypress', proxy_key_typed);
         document.addEventListener('keydown', proxy_key_press);
         document.addEventListener('keyup', proxy_key_release);
+        window.addEventListener('blur', listener_blur);
 
         register_key_listener(listener_hook);
         return Promise.resolve();
@@ -47,6 +49,7 @@ namespace ppt {
         document.removeEventListener("keypress", proxy_key_typed);
         document.removeEventListener("keydown", proxy_key_press);
         document.removeEventListener("keyup", proxy_key_release);
+        window.removeEventListener('blur', listener_blur);
 
         unregister_key_listener(listener_hook);
     }
@@ -74,6 +77,20 @@ namespace ppt {
 
     let key_hooks_active: KeyHook[] = [];
 
+    function listener_blur() {
+        current_state.special[SpecialKey.ALT] = false;
+        current_state.special[SpecialKey.CTRL] = false;
+        current_state.special[SpecialKey.SHIFT] = false;
+        current_state.special[SpecialKey.WINDOWS] = false;
+
+        current_state.code = undefined;
+        current_state.event = undefined;
+
+        for(const hook of key_hooks_active)
+            hook.callback_release();
+        key_hooks_active = [];
+    }
+
     function listener_hook(event: KeyEvent) {
         if(event.type == EventType.KEY_TYPED)
             return;
@@ -94,7 +111,7 @@ namespace ppt {
             current_state.code = event.key_code;
 
             for(const hook of key_hooks) {
-                if(hook.key_code != event.key_code) continue;
+                if(hook.key_code && hook.key_code != event.key_code) continue;
                 if(hook.key_alt != event.key_alt) continue;
                 if(hook.key_ctrl != event.key_ctrl) continue;
                 if(hook.key_shift != event.key_shift) continue;
@@ -103,7 +120,7 @@ namespace ppt {
                 new_hooks.push(hook);
                 if(!old_hooks.remove(hook) && hook.callback_press) {
                     hook.callback_press();
-                    console.debug("Trigger key press for %o!", hook);
+                    log.trace(LogCategory.GENERAL, tr("Trigger key press for %o!"), hook);
                 }
             }
         }
@@ -112,7 +129,7 @@ namespace ppt {
         for(const hook of old_hooks)
             if(hook.callback_release) {
                 hook.callback_release();
-                console.debug("Trigger key release for %o!", hook);
+                log.trace(LogCategory.GENERAL, tr("Trigger key release for %o!"), hook);
             }
         key_hooks_active = new_hooks;
     }

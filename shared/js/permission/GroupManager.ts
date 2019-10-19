@@ -47,15 +47,19 @@ class Group {
     }
 
     updateProperty(key, value) {
-        JSON.map_field_to(this.properties, value, key);
+        if(!JSON.map_field_to(this.properties, value, key))
+            return; /* no updates */
 
         if(key == "iconid") {
             this.properties.iconid = (new Uint32Array([this.properties.iconid]))[0];
-            console.log("Icon id " + this.properties.iconid);
             this.handle.handle.channelTree.clientsByGroup(this).forEach(client => {
                 client.updateGroupIcon(this);
             });
-        }
+        } else if(key == "sortid")
+            this.handle.handle.channelTree.clientsByGroup(this).forEach(client => {
+                client.update_group_icon_order();
+            });
+
     }
 }
 
@@ -71,6 +75,12 @@ class GroupManager extends connection.AbstractCommandHandler {
 
         client.serverConnection.command_handler_boss().register_handler(this);
         this.handle = client;
+    }
+
+    destroy() {
+        this.handle.serverConnection && this.handle.serverConnection.command_handler_boss().unregister_handler(this);
+        this.serverGroups = undefined;
+        this.channelGroups = undefined;
     }
 
     handle_command(command: connection.ServerCommand): boolean {
@@ -94,6 +104,11 @@ class GroupManager extends connection.AbstractCommandHandler {
 
     static sorter() : (a: Group, b: Group) => number {
         return (a, b) => {
+            if(!a)
+                return b ? 1 : 0;
+            if(!b)
+                return a ? -1 : 0;
+
             if(a.properties.sortid > b.properties.sortid)
                 return 1;
             if(a.properties.sortid < b.properties.sortid)
@@ -124,7 +139,7 @@ class GroupManager extends connection.AbstractCommandHandler {
         if(json[0]["sgid"]) target = GroupTarget.SERVER;
         else if(json[0]["cgid"]) target = GroupTarget.CHANNEL;
         else {
-            console.error(tr("Could not resolve group target! => %o"), json[0]);
+            log.error(LogCategory.CLIENT, tr("Could not resolve group target! => %o"), json[0]);
             return;
         }
 
@@ -140,8 +155,7 @@ class GroupManager extends connection.AbstractCommandHandler {
                 case 1: type = GroupType.NORMAL; break;
                 case 2: type = GroupType.QUERY; break;
                 default:
-                    //TODO tr
-                    console.error("Invalid group type: " + groupData["type"] + " for group " + groupData["name"]);
+                    log.error(LogCategory.CLIENT, tr("Invalid group type: %o for group %s"), groupData["type"],groupData["name"]);
                     continue;
             }
 
@@ -165,7 +179,6 @@ class GroupManager extends connection.AbstractCommandHandler {
                 this.channelGroups.push(group);
         }
 
-        console.log("Got " + json.length + " new " + target + " groups:");
         for(const client of this.handle.channelTree.clients)
             client.update_displayed_client_groups();
     }

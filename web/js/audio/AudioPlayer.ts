@@ -1,17 +1,11 @@
-interface Navigator {
-    mozGetUserMedia(constraints: MediaStreamConstraints, successCallback: NavigatorUserMediaSuccessCallback, errorCallback: NavigatorUserMediaErrorCallback): void;
-    webkitGetUserMedia(constraints: MediaStreamConstraints, successCallback: NavigatorUserMediaSuccessCallback, errorCallback: NavigatorUserMediaErrorCallback): void;
-}
-
-namespace audio.player  {
+namespace audio.player {
     let _globalContext: AudioContext;
+    let _global_destination: GainNode;
+
     let _globalContextPromise: Promise<void>;
     let _initialized_listener: (() => any)[] = [];
-
-    export interface Device {
-        device_id: string;
-        name: string;
-    }
+    let _master_volume: number = 1;
+    let _no_device = false;
 
     export function initialize() : boolean {
         context();
@@ -23,7 +17,7 @@ namespace audio.player  {
     }
 
     function fire_initialized() {
-        console.log("Fire initialized: %o", _initialized_listener);
+        log.info(LogCategory.AUDIO, tr("File initialized for %d listeners"), _initialized_listener.length);
         while(_initialized_listener.length > 0)
             _initialized_listener.pop_front()();
     }
@@ -34,30 +28,45 @@ namespace audio.player  {
 
         if(!_globalContext)
             _globalContext = new (window.webkitAudioContext || window.AudioContext)();
+
+        _initialized_listener.unshift(() => {
+            _global_destination = _globalContext.createGain();
+            _global_destination.gain.value = _no_device ? 0 : _master_volume;
+            _global_destination.connect(_globalContext.destination);
+        });
         if(_globalContext.state == "suspended") {
             if(!_globalContextPromise) {
                 (_globalContextPromise = _globalContext.resume()).then(() => {
                     fire_initialized();
                 }).catch(error => {
-                    displayCriticalError("Failed to initialize global audio context! (" + error + ")");
+                    loader.critical_error("Failed to initialize global audio context! (" + error + ")");
                 });
             }
             _globalContext.resume(); //We already have our listener
-            return undefined;
+            return _globalContext;
         }
 
         if(_globalContext.state == "running") {
             fire_initialized();
             return _globalContext;
         }
-        return undefined;
+        return _globalContext;
+    }
+
+    export function get_master_volume() : number {
+        return _master_volume;
+    }
+    export function set_master_volume(volume: number) {
+        _master_volume = volume;
+        if(_global_destination)
+            _global_destination.gain.value = _no_device ? 0 : _master_volume;
     }
 
     export function destination() : AudioNode {
         const ctx = context();
         if(!ctx) throw tr("Audio player isn't initialized yet!");
 
-        return ctx.destination;
+        return _global_destination;
     }
 
     export function on_ready(cb: () => any) {
@@ -67,13 +76,20 @@ namespace audio.player  {
             _initialized_listener.push(cb);
     }
 
-    export const WEB_DEVICE: Device = {device_id: "", name: "default playback"};
+    export const WEB_DEVICE: Device = {
+        device_id: "default",
+        name: "default playback",
+        driver: 'Web Audio'
+    };
 
     export function available_devices() : Promise<Device[]> {
         return Promise.resolve([WEB_DEVICE])
     }
 
     export function set_device(device_id: string) : Promise<void> {
+        _no_device = !device_id;
+        _global_destination.gain.value = _no_device ? 0 : _master_volume;
+
         return Promise.resolve();
     }
 

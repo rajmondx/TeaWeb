@@ -383,7 +383,14 @@ class PermissionValue {
     granted(requiredValue: number, required: boolean = true) : boolean {
         let result;
         result = this.value == -1 || this.value >= requiredValue || (this.value == -2 && requiredValue == -2 && !required);
-        log.trace(LogCategory.PERMISSIONS, tr("Test needed required: %o | %i | %o => %o"), this, requiredValue, required, result);
+
+        log.trace(LogCategory.PERMISSIONS,
+            tr("Required permission test resulted for permission %s: %s. Required value: %s, Granted value: %s"),
+            this.type.name,
+            result ? tr("granted") : tr("denied"),
+            requiredValue + (required ? " (" + tr("required") + ")" : ""),
+            this.hasValue() ? this.value : tr("none")
+        );
         return result;
     }
 
@@ -396,8 +403,6 @@ class PermissionValue {
 }
 
 class NeededPermissionValue extends PermissionValue {
-    changeListener: ((newValue: number) => void)[] = [];
-
     constructor(type, value) {
         super(type, value);
     }
@@ -423,6 +428,8 @@ class PermissionManager extends connection.AbstractCommandHandler {
     permissionList: PermissionInfo[] = [];
     permissionGroups: PermissionGroup[] = [];
     neededPermissions: NeededPermissionValue[] = [];
+
+    needed_permission_change_listener: {[permission: string]:(() => any)[]} = {};
 
     requests_channel_permissions: ChannelPermissionRequest[] = [];
     requests_client_permissions: TeaPermissionRequest[] = [];
@@ -515,6 +522,24 @@ class PermissionManager extends connection.AbstractCommandHandler {
         this.handle = client;
     }
 
+    destroy() {
+        this.handle.serverConnection && this.handle.serverConnection.command_handler_boss().unregister_handler(this);
+        this.needed_permission_change_listener = {};
+
+        this.permissionList = undefined;
+        this.permissionGroups = undefined;
+
+        this.neededPermissions = undefined;
+
+        this.requests_channel_permissions = undefined;
+        this.requests_client_permissions = undefined;
+        this.requests_client_channel_permissions = undefined;
+        this.requests_playlist_permissions = undefined;
+
+        this.initializedListener = undefined;
+        this._cacheNeededPermissions = undefined;
+    }
+
     handle_command(command: connection.ServerCommand): boolean {
         switch (command.command) {
             case "notifyclientneededpermissions":
@@ -551,6 +576,7 @@ class PermissionManager extends connection.AbstractCommandHandler {
 
         let group = log.group(log.LogType.TRACE, LogCategory.PERMISSIONS, tr("Permission mapping"));
         const table_entries = [];
+        let permission_id = 0;
         for(let e of json) {
             if(e["group_id_end"]) {
                 let group = new PermissionGroup();
@@ -569,8 +595,10 @@ class PermissionManager extends connection.AbstractCommandHandler {
             }
 
             let perm = new PermissionInfo();
+            permission_id++;
+
             perm.name = e["permname"];
-            perm.id = parseInt(e["permid"]);
+            perm.id = parseInt(e["permid"]) || permission_id; /* using permission_id as fallback if we dont have permid */
             perm.description = e["permdesc"];
             this.permissionList.push(perm);
 
@@ -580,7 +608,7 @@ class PermissionManager extends connection.AbstractCommandHandler {
                 "description": perm.description
             });
         }
-        log.table("Permission list", table_entries);
+        log.table(LogType.DEBUG, LogCategory.PERMISSIONS, "Permission list", table_entries);
         group.end();
 
         log.info(LogCategory.PERMISSIONS, tr("Got %i permissions"), this.permissionList.length);
@@ -628,8 +656,8 @@ class PermissionManager extends connection.AbstractCommandHandler {
             if(entry.value == parseInt(e["permvalue"])) continue;
             entry.value = parseInt(e["permvalue"]);
 
-            for(let listener of entry.changeListener)
-                listener(entry.value);
+            for(const listener of this.needed_permission_change_listener[entry.type.name] || [])
+                listener();
 
             table_entries.push({
                 "permission": entry.type.name,
@@ -637,16 +665,29 @@ class PermissionManager extends connection.AbstractCommandHandler {
             });
         }
 
-        log.table("Needed client permissions", table_entries);
+        log.table(LogType.DEBUG, LogCategory.PERMISSIONS, "Needed client permissions", table_entries);
         group.end();
 
-        //TODO tr
-        log.debug(LogCategory.PERMISSIONS, "Dropping " + copy.length + " needed permissions and added " + addcount + " permissions.");
+        log.debug(LogCategory.PERMISSIONS, tr("Dropping %o needed permissions and added %o permissions."), copy.length, addcount);
         for(let e of copy) {
             e.value = -2;
-            for(let listener of e.changeListener)
-                listener(e.value);
+            for(const listener of this.needed_permission_change_listener[e.type.name] || [])
+                listener();
         }
+    }
+
+    register_needed_permission(key: PermissionType, listener: () => any) {
+        const array = this.needed_permission_change_listener[key] || [];
+        array.push(listener);
+        this.needed_permission_change_listener[key] = array;
+    }
+
+    unregister_needed_permission(key: PermissionType, listener: () => any) {
+        const array = this.needed_permission_change_listener[key];
+        if(!array) return;
+
+        array.remove(listener);
+        this.needed_permission_change_listener[key] = array.length > 0 ? array : undefined;
     }
 
     private onChannelPermList(json) {
@@ -777,7 +818,7 @@ class PermissionManager extends connection.AbstractCommandHandler {
         return request.promise;
     }
 
-    neededPermission(key: number | string | PermissionType | PermissionInfo) : PermissionValue {
+    neededPermission(key: number | string | PermissionType | PermissionInfo) : NeededPermissionValue {
         for(let perm of this.neededPermissions)
             if(perm.type.id == key || perm.type.name == key || perm.type == key)
                 return perm;

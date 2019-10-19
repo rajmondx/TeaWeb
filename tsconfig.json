@@ -3,7 +3,9 @@
   "compilerOptions": {
     "target": "es6",
     "module": "commonjs",
-    "sourceMap": true
+    "sourceMap": true,
+    "lib": ["es6", "dom", "dom.iterable"],
+    "removeComments": true /* we dont really need them within the target files */
   },
   "exclude": [
     "node_modules",

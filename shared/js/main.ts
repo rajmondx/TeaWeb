@@ -1,28 +1,30 @@
 /// <reference path="ui/frames/chat.ts" />
 /// <reference path="ui/modal/ModalConnect.ts" />
 /// <reference path="ui/modal/ModalCreateChannel.ts" />
-/// <reference path="ui/modal/ModalBanCreate.ts" />
 /// <reference path="ui/modal/ModalBanClient.ts" />
 /// <reference path="ui/modal/ModalYesNo.ts" />
 /// <reference path="ui/modal/ModalBanList.ts" />
 /// <reference path="settings.ts" />
 /// <reference path="log.ts" />
-
-let settings: Settings;
+/// <reference path="PPTListener.ts" />
 
 const js_render = window.jsrender || $;
 const native_client = window.require !== undefined;
 
-function getUserMediaFunction() {
-    if((navigator as any).mediaDevices && (navigator as any).mediaDevices.getUserMedia)
-        return (settings, success, fail) => { (navigator as any).mediaDevices.getUserMedia(settings).then(success).catch(fail); };
-    return (navigator as any).getUserMedia || (navigator as any).webkitGetUserMedia || (navigator as any).mozGetUserMedia;
+function getUserMediaFunctionPromise() : (constraints: MediaStreamConstraints) => Promise<MediaStream> {
+    if('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices)
+        return constraints => navigator.mediaDevices.getUserMedia(constraints);
+
+    const _callbacked_function = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+    if(!_callbacked_function)
+        return undefined;
+
+    return constraints => new Promise<MediaStream>((resolve, reject) => _callbacked_function(constraints, resolve, reject));
 }
 
 interface Window {
     open_connected_question: () => Promise<boolean>;
 }
-
 
 function setup_close() {
     window.onbeforeunload = event => {
@@ -36,18 +38,41 @@ function setup_close() {
             if(!native_client) {
                 event.returnValue = "Are you really sure?<br>You're still connected!";
             } else {
+                const do_exit = () => {
+                    const dp = server_connections.server_connection_handlers().map(e => {
+                        if(e.serverConnection.connected())
+                            return e.serverConnection.disconnect(tr("client closed"));
+                        return Promise.resolve();
+                    }).map(e => e.catch(error => {
+                        console.warn(tr("Failed to disconnect from server on client close: %o"), e);
+                    }));
+
+                    const exit = () => {
+                        const {remote} = require('electron');
+                        remote.getCurrentWindow().close();
+                    };
+
+                    Promise.all(dp).then(exit);
+                    /* force exit after 2500ms */
+                    setTimeout(exit, 2500);
+                };
                 if(window.open_connected_question) {
                     event.preventDefault();
                     event.returnValue = "question";
                     window.open_connected_question().then(result => {
                         if(result) {
-                            window.onbeforeunload = undefined;
+                            /* prevent quitting because we try to disconnect */
+                            window.onbeforeunload = e => e.preventDefault();
 
-                            const {remote} = require('electron');
-                            remote.getCurrentWindow().close();
+                            /* allow a force quit after 5 seconds */
+                            setTimeout(() => window.onbeforeunload, 5000);
+                            do_exit();
                         }
                     });
-                } else { /* we're in debugging mode */ }
+                } else {
+                    /* we're in debugging mode */
+                    do_exit();
+                }
             }
         }
     };
@@ -56,11 +81,11 @@ function setup_close() {
 declare function moment(...arguments) : any;
 function setup_jsrender() : boolean {
     if(!js_render) {
-        displayCriticalError("Missing jsrender extension!");
+        loader.critical_error("Missing jsrender extension!");
         return false;
     }
     if(!js_render.views) {
-        displayCriticalError("Missing jsrender viewer extension!");
+        loader.critical_error("Missing jsrender viewer extension!");
         return false;
     }
     js_render.views.settings.allowCode(true);
@@ -80,53 +105,39 @@ function setup_jsrender() : boolean {
     });
 
     $(".jsrender-template").each((idx, _entry) => {
-        if(!js_render.templates(_entry.id, _entry.innerHTML)) { //, _entry.innerHTML
-            console.error("Failed to cache template " + _entry.id + " for js render!");
+        if(!js_render.templates(_entry.id, _entry.innerHTML)) {
+            log.error(LogCategory.GENERAL, tr("Failed to setup cache for js renderer template %s!"), _entry.id);
         } else
-            console.debug("Successfully loaded jsrender template " + _entry.id);
+            log.info(LogCategory.GENERAL, tr("Successfully loaded jsrender template %s"), _entry.id);
     });
     return true;
 }
 
 async function initialize() {
-    settings = new Settings();
+    Settings.initialize();
 
     try {
         await i18n.initialize();
     } catch(error) {
         console.error(tr("Failed to initialized the translation system!\nError: %o"), error);
-        displayCriticalError("Failed to setup the translation system");
+        loader.critical_error("Failed to setup the translation system");
         return;
     }
 
     bipc.setup();
 }
 
-
 async function initialize_app() {
-    const display_load_error = message => {
-        if(typeof(display_critical_load) !== "undefined")
-            display_critical_load(message);
-        else
-            displayCriticalError(message);
-    };
-
-    try {
-        if(!setup_jsrender())
-            throw "invalid load";
-    } catch (error) {
-        display_load_error(tr("Failed to setup jsrender"));
-        console.error(tr("Failed to load jsrender! %o"), error);
-        return;
-    }
-
     try { //Initialize main template
-        const main = $("#tmpl_main").renderTag().dividerfy();
+        const main = $("#tmpl_main").renderTag({
+            multi_session:  !settings.static_global(Settings.KEY_DISABLE_MULTI_SESSION),
+            app_version: app.ui_version()
+        }).dividerfy();
 
         $("body").append(main);
     } catch(error) {
-        console.error(error);
-        display_load_error(tr("Failed to setup main page!"));
+        log.error(LogCategory.GENERAL, error);
+        loader.critical_error(tr("Failed to setup main page!"));
         return;
     }
 
@@ -134,26 +145,32 @@ async function initialize_app() {
 
     if(!audio.player.initialize())
         console.warn(tr("Failed to initialize audio controller!"));
+    if(audio.player.set_master_volume)
+        audio.player.set_master_volume(settings.global(Settings.KEY_SOUND_MASTER) / 100);
+    else
+        log.warn(LogCategory.GENERAL, tr("Client does not support audio.player.set_master_volume()... May client is too old?"));
+    if(audio.recorder.device_refresh_available())
+        await audio.recorder.refresh_devices();
+
+    default_recorder = new RecorderProfile("default");
+    await default_recorder.initialize();
 
     sound.initialize().then(() => {
-        console.log(tr("Sounds initialitzed"));
+        log.info(LogCategory.AUDIO, tr("Sounds initialized"));
     });
+    sound.set_master_volume(settings.global(Settings.KEY_SOUND_MASTER_SOUNDS) / 100);
 
     await profiles.load();
 
     try {
         await ppt.initialize();
     } catch(error) {
-        console.error(tr("Failed to initialize ppt!\nError: %o"), error);
-        displayCriticalError(tr("Failed to initialize ppt!"));
+        log.error(LogCategory.GENERAL, tr("Failed to initialize ppt!\nError: %o"), error);
+        loader.critical_error(tr("Failed to initialize ppt!"));
         return;
     }
 
     setup_close();
-}
-
-function ab2str(buf) {
-    return String.fromCharCode.apply(null, new Uint16Array(buf));
 }
 
 function str2ab8(str) {
@@ -176,81 +193,173 @@ function arrayBufferBase64(base64: string) {
     return buf;
 }
 
-function base64ArrayBuffer(arrayBuffer) {
-    var base64    = ''
-    var encodings = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function base64_encode_ab(source: ArrayBufferLike) {
+    const encodings = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let base64      = "";
 
-    var bytes         = new Uint8Array(arrayBuffer)
-    var byteLength    = bytes.byteLength
-    var byteRemainder = byteLength % 3
-    var mainLength    = byteLength - byteRemainder
+    const bytes          = new Uint8Array(source);
+    const byte_length    = bytes.byteLength;
+    const byte_reminder  = byte_length % 3;
+    const main_length    = byte_length - byte_reminder;
 
-    var a, b, c, d
-    var chunk
+    let a, b, c, d;
+    let chunk;
 
     // Main loop deals with bytes in chunks of 3
-    for (var i = 0; i < mainLength; i = i + 3) {
+    for (let i = 0; i < main_length; i = i + 3) {
         // Combine the three bytes into a single integer
-        chunk = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2]
+        chunk = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
 
         // Use bitmasks to extract 6-bit segments from the triplet
-        a = (chunk & 16515072) >> 18 // 16515072 = (2^6 - 1) << 18
-        b = (chunk & 258048)   >> 12 // 258048   = (2^6 - 1) << 12
-        c = (chunk & 4032)     >>  6 // 4032     = (2^6 - 1) << 6
-        d = chunk & 63               // 63       = 2^6 - 1
+        a = (chunk & 16515072) >> 18; // 16515072 = (2^6 - 1) << 18
+        b = (chunk & 258048)   >> 12; // 258048   = (2^6 - 1) << 12
+        c = (chunk & 4032)     >>  6; // 4032     = (2^6 - 1) <<  6
+        d = (chunk & 63)       >>  0; // 63       = (2^6 - 1) <<  0
 
         // Convert the raw binary segments to the appropriate ASCII encoding
-        base64 += encodings[a] + encodings[b] + encodings[c] + encodings[d]
+        base64 += encodings[a] + encodings[b] + encodings[c] + encodings[d];
     }
 
     // Deal with the remaining bytes and padding
-    if (byteRemainder == 1) {
-        chunk = bytes[mainLength]
+    if (byte_reminder == 1) {
+        chunk = bytes[main_length];
 
-        a = (chunk & 252) >> 2 // 252 = (2^6 - 1) << 2
+        a = (chunk & 252) >> 2; // 252 = (2^6 - 1) << 2
 
         // Set the 4 least significant bits to zero
-        b = (chunk & 3)   << 4 // 3   = 2^2 - 1
+        b = (chunk & 3)   << 4; // 3   = 2^2 - 1
 
-        base64 += encodings[a] + encodings[b] + '=='
-    } else if (byteRemainder == 2) {
-        chunk = (bytes[mainLength] << 8) | bytes[mainLength + 1]
+        base64 += encodings[a] + encodings[b] + '==';
+    } else if (byte_reminder == 2) {
+        chunk = (bytes[main_length] << 8) | bytes[main_length + 1];
 
-        a = (chunk & 64512) >> 10 // 64512 = (2^6 - 1) << 10
-        b = (chunk & 1008)  >>  4 // 1008  = (2^6 - 1) << 4
+        a = (chunk & 64512) >> 10; // 64512 = (2^6 - 1) << 10
+        b = (chunk & 1008)  >>  4; // 1008  = (2^6 - 1) <<  4
 
         // Set the 2 least significant bits to zero
-        c = (chunk & 15)    <<  2 // 15    = 2^4 - 1
+        c = (chunk & 15)    <<  2; // 15    = 2^4 - 1
 
-        base64 += encodings[a] + encodings[b] + encodings[c] + '='
+        base64 += encodings[a] + encodings[b] + encodings[c] + '=';
     }
 
     return base64
 }
 
-function Base64EncodeUrl(str){
-    return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/\=+$/, '');
-}
+/*
+class TestProxy extends bipc.MethodProxy {
+    constructor(params: bipc.MethodProxyConnectParameters) {
+        super(bipc.get_handler(), params.channel_id && params.client_id ? params : undefined);
 
-function Base64DecodeUrl(str: string, pad?: boolean){
-    if(typeof(pad) === 'undefined' || pad)
-        str = (str + '===').slice(0, str.length + (str.length % 4));
-    return str.replace(/-/g, '+').replace(/_/g, '/');
+        if(!this.is_slave()) {
+            this.register_method(this.add_slave);
+        }
+        if(!this.is_master()) {
+            this.register_method(this.say_hello);
+            this.register_method(this.add_master);
+        }
+    }
+
+    setup() {
+        super.setup();
+    }
+
+    protected on_connected() {
+        log.info(LogCategory.IPC, "Test proxy connected");
+    }
+
+    protected on_disconnected() {
+        log.info(LogCategory.IPC, "Test proxy disconnected");
+    }
+
+    private async say_hello() : Promise<void> {
+        log.info(LogCategory.IPC, "Hello World");
+    }
+
+    private async add_slave(a: number, b: number) : Promise<number> {
+        return a + b;
+    }
+
+    private async add_master(a: number, b: number) : Promise<number> {
+        return a * b;
+    }
+}
+interface Window {
+    proxy_instance: TestProxy & {url: () => string};
+}
+*/
+
+function execute_default_connect() {
+    if(settings.static(Settings.KEY_FLAG_CONNECT_DEFAULT, false) && settings.static(Settings.KEY_CONNECT_ADDRESS, "")) {
+        const profile_uuid = settings.static(Settings.KEY_CONNECT_PROFILE, (profiles.default_profile() || {id: 'default'}).id);
+        const profile = profiles.find_profile(profile_uuid) || profiles.default_profile();
+        const address = settings.static(Settings.KEY_CONNECT_ADDRESS, "");
+        const username = settings.static(Settings.KEY_CONNECT_USERNAME, "Another TeaSpeak user");
+
+        const password = settings.static(Settings.KEY_CONNECT_PASSWORD, "");
+        const password_hashed = settings.static(Settings.KEY_FLAG_CONNECT_PASSWORD, false);
+
+        if(profile && profile.valid()) {
+            const connection = server_connections.active_connection_handler() || server_connections.spawn_server_connection_handler();
+            connection.startConnection(address, profile, true, {
+                nickname: username,
+                password: password.length > 0 ? {
+                    password: password,
+                    hashed: password_hashed
+                } : undefined
+            });
+        } else {
+            Modals.spawnConnectModal({},{
+                url: address,
+                enforce: true
+            }, {
+                profile: profile,
+                enforce: true
+            });
+        }
+    }
 }
 
 function main() {
+    /*
+    window.proxy_instance = new TestProxy({
+        client_id: settings.static_global<string>("proxy_client_id", undefined),
+        channel_id: settings.static_global<string>("proxy_channel_id", undefined)
+    }) as any;
+    if(window.proxy_instance.is_master()) {
+        window.proxy_instance.setup();
+        window.proxy_instance.url = () => {
+            const data = window.proxy_instance.generate_connect_parameters();
+            return "proxy_channel_id=" + data.channel_id + "&proxy_client_id=" + data.client_id;
+        };
+    }
+    */
     //http://localhost:63343/Web-Client/index.php?_ijt=omcpmt8b9hnjlfguh8ajgrgolr&default_connect_url=true&default_connect_type=teamspeak&default_connect_url=localhost%3A9987&disableUnloadDialog=1&loader_ignore_age=1
-    voice_recoder = new VoiceRecorder();
-    voice_recoder.reinitialiseVAD();
+
+    /* initialize font */
+    {
+        const font = settings.static_global(Settings.KEY_FONT_SIZE, 14); //parseInt(getComputedStyle(document.body).fontSize)
+        $(document.body).css("font-size", font + "px");
+    }
+
+    /* context menu prevent */
+    $(document).on('contextmenu', event => {
+        if(event.isDefaultPrevented())
+            return;
+
+        if(!settings.static_global(Settings.KEY_DISABLE_GLOBAL_CONTEXT_MENU))
+            event.preventDefault();
+    });
+
+    top_menu.initialize();
 
     server_connections = new ServerConnectionManager($("#connection-handlers"));
     control_bar.initialise(); /* before connection handler to allow property apply */
 
     const initial_handler = server_connections.spawn_server_connection_handler();
-    initial_handler.acquire_recorder(voice_recoder, false);
+    initial_handler.acquire_recorder(default_recorder, false);
     control_bar.set_connection_handler(initial_handler);
     /** Setup the XF forum identity **/
-    profiles.identities.setup_forum();
+    profiles.identities.update_forum();
 
     let _resize_timeout: NodeJS.Timer;
     $(window).on('resize', event => {
@@ -265,6 +374,7 @@ function main() {
             const active_connection = server_connections.active_connection_handler();
             if(active_connection)
                 active_connection.resize_elements();
+            $(".window-resize-listener").trigger('resize');
         }, 1000);
     });
 
@@ -274,14 +384,12 @@ function main() {
         volatile_collection_only: false
     });
     stats.register_user_count_listener(status => {
-        console.log("Received user count update: %o", status);
+        log.info(LogCategory.STATISTICS, tr("Received user count update: %o"), status);
     });
 
-    /*
-    setTimeout(() => {
-        Modals.spawnAvatarList(globalClient);
-    }, 1000);
-    */
+    server_connections.set_active_connection_handler(server_connections.server_connection_handlers()[0]);
+
+
     (<any>window).test_upload = (message?: string) => {
         message = message || "Hello World";
 
@@ -293,7 +401,6 @@ function main() {
             name: '/HelloWorld.txt',
             path: ''
         }).then(key => {
-            console.log("Got key: %o", key);
             const upload = new RequestFileUpload(key);
 
             const buffer = new Uint8Array(message.length);
@@ -308,34 +415,65 @@ function main() {
         })
     };
 
-    server_connections.set_active_connection_handler(server_connections.server_connection_handlers()[0]);
+    /* schedule it a bit later then the main because the main function is still within the loader */
+    setTimeout(execute_default_connect, 5);
+    setTimeout(() => {
+        const connection = server_connections.active_connection_handler();
+        /*
+        Modals.createChannelModal(connection, undefined, undefined, connection.permissions, (cb, perms) => {
+            
+        });
+        */
+       // Modals.openServerInfo(connection.channelTree.server);
+        //Modals.createServerModal(connection.channelTree.server, properties => Promise.resolve());
 
-    if(settings.static(Settings.KEY_FLAG_CONNECT_DEFAULT, false) && settings.static(Settings.KEY_CONNECT_ADDRESS, "")) {
-        const profile_uuid = settings.static(Settings.KEY_CONNECT_PROFILE, (profiles.default_profile() || {id: 'default'}).id);
-        console.log("UUID: %s", profile_uuid);
-        const profile = profiles.find_profile(profile_uuid) || profiles.default_profile();
-        const address = settings.static(Settings.KEY_CONNECT_ADDRESS, "");
-        const username = settings.static(Settings.KEY_CONNECT_USERNAME, "Another TeaSpeak user");
+        //Modals.openClientInfo(connection.getClient());
+        //Modals.openServerInfoBandwidth(connection.channelTree.server);
 
-        const password = settings.static(Settings.KEY_CONNECT_PASSWORD, "");
-        const password_hashed = settings.static(Settings.KEY_FLAG_CONNECT_PASSWORD, false);
+        //Modals.openBanList(connection);
+        /*
+        Modals.spawnBanClient(connection,[
+            {name: "WolverinDEV", unique_id: "XXXX"},
+            {name: "WolverinDEV", unique_id: "XXXX"},
+            {name: "WolverinDEV", unique_id: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"},
+            {name: "WolverinDEV", unique_id: "YYY"}
+        ], () => {});
+        */
+    }, 4000);
+    //Modals.spawnSettingsModal("identity-profiles");
+    //Modals.spawnKeySelect(console.log);
+    //Modals.spawnBookmarkModal();
 
-        if(profile && profile.valid()) {
-            const connection = server_connections.active_connection_handler() || server_connections.spawn_server_connection_handler();
-            connection.startConnection(address, profile, username, password.length > 0 ? {
-                password: password,
-                hashed: password_hashed
-            } : undefined);
-        } else {
-            Modals.spawnConnectModal({
-                url: address,
-                enforce: true
-            }, {
-                profile: profile,
-                enforce: true
-            });
-        }
+    /*
+    {
+        const modal = createModal({
+            header: tr("Test Net Graph"),
+            body: () => {
+                const canvas = $.spawn("canvas")
+                    .css("position", "absolute")
+                    .css({
+                        top: 0,
+                        bottom: 0,
+                        right: 0,
+                        left: 0
+                    });
+
+                return $.spawn("div")
+                    .css("height", "5em")
+                    .css("width", "30em")
+                    .css("position", "relative")
+                    .append(canvas);
+            },
+            footer: null
+        });
+
+        const graph = new net.graph.Graph(modal.htmlTag.find("canvas")[0] as any);
+        graph.initialize();
+
+        modal.close_listener.push(() => graph.terminate());
+        modal.open();
     }
+     */
 }
 
 const task_teaweb_starter: loader.Task = {
@@ -355,7 +493,7 @@ const task_teaweb_starter: loader.Task = {
             console.error(ex.stack);
             if(ex instanceof ReferenceError || ex instanceof TypeError)
                 ex = ex.name + ": " + ex.message;
-            displayCriticalError("Failed to invoke main function:<br>" + ex);
+            loader.critical_error("Failed to invoke main function:<br>" + ex);
         }
     },
     priority: 10
@@ -413,7 +551,22 @@ const task_certificate_callback: loader.Task = {
     priority: 10
 };
 
-loader.register_task(loader.Stage.LOADED, {
+loader.register_task(loader.Stage.JAVASCRIPT_INITIALIZING, {
+    name: "jrendere initialize",
+    function: async () => {
+        try {
+            if(!setup_jsrender())
+                throw "invalid load";
+        } catch (error) {
+            loader.critical_error(tr("Failed to setup jsrender"));
+            console.error(tr("Failed to load jsrender! %o"), error);
+            return;
+        }
+    },
+    priority: 100
+});
+
+loader.register_task(loader.Stage.JAVASCRIPT_INITIALIZING, {
     name: "app starter",
     function: async () => {
         try {
@@ -424,12 +577,14 @@ loader.register_task(loader.Stage.LOADED, {
             } else
                 loader.register_task(loader.Stage.LOADED, task_teaweb_starter);
         } catch (ex) {
-            console.error(ex.stack);
+            if(ex instanceof Error || typeof(ex.stack) !== "undefined")
+                console.error((tr || (msg => msg))("Critical error stack trace: %o"), ex.stack);
+
             if(ex instanceof ReferenceError || ex instanceof TypeError)
                 ex = ex.name + ": " + ex.message;
-            displayCriticalError("Failed to boot app function:<br>" + ex);
+            loader.critical_error("Failed to boot app function:<br>" + ex);
         }
     },
-    priority: 10
+    priority: 1000
 });
 

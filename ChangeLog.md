@@ -1,4 +1,68 @@
 # Changelog:
+    
+* **XX.XX.XX**
+    - Removed icon size restriction for SVGs
+    - Fixed permission editor icon select for not granted icon permissions
+    - Fixed "disconnect" button not showing up after beeing connected
+    - Improved handling of `disableMultiSession` settings (Connect in a new tab does not show up anymore)
+    - Implemented avatar upload
+    - Sorting server group icons within client channel tree
+    - Fixed buggy away message position
+    - Logging the servers welcome message [#54](https://github.com/TeaSpeak/TeaWeb/issues/54)
+    - Showing servers hostbutton
+    - Fixed microphone and sound action sounds [#67](https://github.com/TeaSpeak/TeaWeb/issues/67)
+    - Added option to mute clients [#64](https://github.com/TeaSpeak/TeaWeb/issues/64)
+    - Improved debug loader (no dependency faults anymore)
+    - Saving private conversations and showing the messages again after client restart
+    - Fixed some general memory leaks
+    - Implemented the hostmessage functions
+    - Fixed bookmark server password
+    - Improved UI performance
+    
+    Big UI Improvement:
+    - New "dark theme" design
+    - All elements are responsive to the font-size (Supporting now large & small screens (No mobile support yet))
+    - Implemented an active ping calculation
+    
+* **22.06.19**
+    - Fixed channel create not working issue
+    - Added BB-Code support for pokes
+    
+* **20.06.19**
+    - Improved the threshold audio filter
+    - Parsing `[spacerX]` channels properly
+    
+* **25.05.19**
+    - Show icons within the permission editor
+    - Added the possibility to select icons within the permission editor
+    - Added server group clients list
+    - Improved invite buddy dialog
+    - Improved poke modal system
+    - Improved modal template for text input
+    
+* **24.05.19**
+    - Implemented icon upload
+    
+* **21.05.19**
+    - Restructured project
+    - Redesigned the audio input API (required for the client)
+    - Minifying release file
+    - Fixed travis builds
+    
+* **29.04.19**
+    - Added a master volume slider and separated it from the sounds master volume
+    - Saving changed sound and master volume settings
+    
+* **26.04.19**
+    - Significant permission editor performance improve
+      Using canvas now instead of a lots of HTML nodes
+    - Fixed client related query and music bot issues
+    
+* **15.04.19**
+    - Adjusted hostbanner properties
+    - Added a chat history log
+    - Added some extra features needed for the client
+    
 * **04.04.19**
     - Fixed issue with client icons not updating correctly (Showing invalid microphone state)
     - Added multi server mode

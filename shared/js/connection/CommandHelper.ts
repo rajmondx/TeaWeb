@@ -12,7 +12,14 @@ namespace connection {
 
         initialize() {
             this.connection.command_handler_boss().register_handler(this);
-            /* notifyquerylist */
+        }
+
+        destroy() {
+            if(this.connection) {
+                const hboss = this.connection.command_handler_boss();
+                hboss && hboss.unregister_handler(this);
+            }
+            this._awaiters_unique_ids = undefined;
         }
 
         handle_command(command: connection.ServerCommand): boolean {
@@ -107,7 +114,7 @@ namespace connection {
 
                         for(const entry of json) {
                             const rentry = {} as QueryListEntry;
-                            rentry.bounded_server = entry["client_bounded_server"];
+                            rentry.bounded_server = parseInt(entry["client_bound_server"]);
                             rentry.username = entry["client_login_name"];
                             rentry.unique_id = entry["client_unique_identifier"];
 
@@ -238,6 +245,44 @@ namespace connection {
             });
         }
 
+        async request_clients_by_server_group(group_id: number) : Promise<ServerGroupClient[]> {
+            //servergroupclientlist sgid=2
+            //notifyservergroupclientlist sgid=6 cldbid=2 client_nickname=WolverinDEV client_unique_identifier=xxjnc14LmvTk+Lyrm8OOeo4tOqw=
+            return new Promise<ServerGroupClient[]>((resolve, reject) => {
+                const single_handler: SingleCommandHandler = {
+                    command: "notifyservergroupclientlist",
+                    function: command => {
+                        if (command.arguments[0]["sgid"] != group_id) {
+                            log.error(LogCategory.NETWORKING, tr("Received invalid notification for server group client list"));
+                            return false;
+                        }
+
+                        try {
+                            const result: ServerGroupClient[] = [];
+                            for(const entry of command.arguments)
+                                result.push({
+                                    client_database_id: parseInt(entry["cldbid"]),
+                                    client_nickname: entry["client_nickname"],
+                                    client_unique_identifier: entry["client_unique_identifier"]
+                                });
+                            resolve(result);
+                        } catch (error) {
+                            log.error(LogCategory.NETWORKING, tr("Failed to parse server group client list: %o"), error);
+                            reject("failed to parse info");
+                        }
+
+                        return true;
+                    }
+                };
+                this.handler_boss.register_single_handler(single_handler);
+
+                this.connection.send_command("servergroupclientlist", {sgid: group_id}).catch(error => {
+                    this.handler_boss.remove_single_handler(single_handler);
+                    reject(error);
+                })
+            });
+        }
+
         request_playlist_info(playlist_id: number) : Promise<PlaylistInfo> {
             return new Promise((resolve, reject) => {
                 const single_handler: SingleCommandHandler = {
@@ -294,7 +339,7 @@ namespace connection {
             return new Promise<number>((resolve, reject) => {
                 const single_handler: SingleCommandHandler = {
                     function: command => {
-                        if(command.command != "")
+                        if(command.command != "" && command.command.indexOf("=") == -1)
                             return false;
 
                         this._who_am_i = command.arguments[0];

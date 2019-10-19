@@ -1,4 +1,3 @@
-/// <reference path="../voice/VoiceHandler.ts" />
 /// <reference path="../ConnectionHandler.ts" />
 /// <reference path="../proto.ts" />
 /// <reference path="channel.ts" />
@@ -10,8 +9,8 @@ class ChannelTree {
     client: ConnectionHandler;
     server: ServerEntry;
 
-    channels: ChannelEntry[];
-    clients: ClientEntry[];
+    channels: ChannelEntry[] = [];
+    clients: ClientEntry[] = [];
 
     currently_selected: ClientEntry | ServerEntry | ChannelEntry | (ClientEntry | ServerEntry)[] = undefined;
     currently_selected_context_callback: (event) => any = undefined;
@@ -25,11 +24,11 @@ class ChannelTree {
     private channel_last?: ChannelEntry;
     private channel_first?: ChannelEntry;
 
-    private selected_event?: Event;
+    private _focused = false;
+    private _listener_document_click;
+    private _listener_document_key;
 
     constructor(client) {
-        document.addEventListener("touchstart", function(){}, true);
-
         this.client = client;
 
         this._tag_container = $.spawn("div").addClass("channel-tree-container");
@@ -57,20 +56,45 @@ class ChannelTree {
         }
 
         this._tag_container.on('resize', this.handle_resized.bind(this));
-
-        /* TODO release these events again when ChannelTree get deinitialized */
-        $(document).on('click', event => {
-            if(this.selected_event != event.originalEvent)
-                this.selected_event = undefined;
-        });
-        $(document).on('keydown', this.handle_key_press.bind(this));
-        this._tag_container.on('click', event => {{
-            this.selected_event = event.originalEvent;
-        }});
+        this._listener_document_key = event => this.handle_key_press(event);
+        this._listener_document_click = event => {
+            this._focused = false;
+            let element = event.target as HTMLElement;
+            while(element) {
+                if(element === this._tag_container[0]) {
+                    this._focused = true;
+                    break;
+                }
+                element = element.parentNode as HTMLElement;
+            }
+        };
+        document.addEventListener('click', this._listener_document_click);
+        document.addEventListener('keydown', this._listener_document_key);
     }
 
     tag_tree() : JQuery {
         return this._tag_container;
+    }
+
+    destroy() {
+        this._listener_document_click && document.removeEventListener('click', this._listener_document_click);
+        this._listener_document_click = undefined;
+
+        this._listener_document_key && document.removeEventListener('keydown', this._listener_document_key);
+        this._listener_document_key = undefined;
+
+        if(this.server) {
+            this.server.destroy();
+            this.server = undefined;
+        }
+        this.reset(); /* cleanup channel and clients */
+
+        this.channel_first = undefined;
+        this.channel_last = undefined;
+
+        this._tag_container.remove();
+        this.currently_selected = undefined;
+        this.currently_selected_context_callback = undefined;
     }
 
     hide_channel_tree() {
@@ -82,7 +106,10 @@ class ChannelTree {
         this._tree_detached = false;
         this._tag_entries.appendTo(this._tag_container);
 
-        this.channels.forEach(e => e.recalculate_repetitive_name());
+        this.channels.forEach(e => {
+            e.recalculate_repetitive_name();
+            e.reorderClients();
+        });
     }
 
     showContextMenu(x: number, y: number, on_close: () => void = undefined) {
@@ -91,19 +118,23 @@ class ChannelTree {
             this.client.permissions.neededPermission(PermissionType.B_CHANNEL_CREATE_SEMI_PERMANENT).granted(1) ||
             this.client.permissions.neededPermission(PermissionType.B_CHANNEL_CREATE_PERMANENT).granted(1);
 
-        spawn_context_menu(x, y,
+        contextmenu.spawn_context_menu(x, y,
             {
-                type: MenuEntryType.ENTRY,
-                icon: "client-channel_create",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-channel_create",
                 name: tr("Create channel"),
                 invalidPermission: !channelCreate,
                 callback: () => this.spawnCreateChannel()
             },
-            MenuEntry.CLOSE(on_close)
+            contextmenu.Entry.CLOSE(on_close)
         );
     }
 
     initialiseHead(serverName: string, address: ServerAddress) {
+        if(this.server) {
+            this.server.destroy();
+            this.server = undefined;
+        }
         this.server = new ServerEntry(this, serverName, address);
         this.server.htmlTag.appendTo(this._tag_entries);
         this.server.initializeListener();
@@ -113,6 +144,7 @@ class ChannelTree {
         let tag = element instanceof ChannelEntry ? element.rootTag() : element.tag;
         tag.fadeOut("slow", () => {
             tag.detach();
+            element.destroy();
         });
     }
 
@@ -297,12 +329,17 @@ class ChannelTree {
     }
 
     deleteClient(client: ClientEntry, animate_tag?: boolean) {
+        const old_channel = client.currentChannel();
         this.clients.remove(client);
         if(typeof(animate_tag) !== "boolean" || animate_tag)
             this.__deleteAnimation(client);
         else
             client.tag.detach();
         client.onDelete();
+
+        if(old_channel) {
+            this.client.side_bar.info_frame().update_channel_client_count(old_channel);
+        }
 
         const voice_connection = this.client.serverConnection.voice_connection();
         if(client.get_audio_handle()) {
@@ -312,7 +349,7 @@ class ChannelTree {
                 voice_connection.unregister_client(client.get_audio_handle());
             }
         }
-        client.set_audio_handle(undefined); /* just to be sure */
+        client.set_audio_handle(undefined);
     }
 
     registerClient(client: ClientEntry) {
@@ -323,6 +360,15 @@ class ChannelTree {
         if(voice_connection)
             client.set_audio_handle(voice_connection.register_client(client.clientId()));
     }
+
+    unregisterClient(client: ClientEntry) {
+        if(!this.clients.remove(client))
+            return;
+        client.tree_unregistered();
+    }
+
+    private _update_timer: number;
+    private _reorder_channels = new Set<ChannelEntry>();
 
     insertClient(client: ClientEntry, channel: ChannelEntry) : ClientEntry {
         let newClient = this.findClient(client.clientId());
@@ -341,10 +387,22 @@ class ChannelTree {
             tag.css("display", "none").fadeIn("slow");
 
         tag.appendTo(channel.clientTag());
-        client.currentChannel().reorderClients();
+        channel.reorderClients();
 
-        channel.updateChannelTypeIcon();
-        client.update_family_index();
+        /* schedule a reorder for this channel. */
+        this._reorder_channels.add(client.currentChannel());
+        if(!this._update_timer) {
+            this._update_timer = setTimeout(() => {
+                this._update_timer = undefined;
+                for(const channel of this._reorder_channels) {
+                    channel.updateChannelTypeIcon();
+                    this.client.side_bar.info_frame().update_channel_client_count(channel);
+                }
+                this._reorder_channels.clear();
+            }, 5) as any;
+        }
+
+        client.update_family_index(); /* why the hell is this here?! */
         return client;
     }
 
@@ -357,10 +415,12 @@ class ChannelTree {
         tag.appendTo(client.currentChannel().clientTag());
         if(oldChannel) {
             oldChannel.updateChannelTypeIcon();
+            this.client.side_bar.info_frame().update_channel_client_count(oldChannel);
         }
-        if(client.currentChannel()) {
-            client.currentChannel().reorderClients();
-            client.currentChannel().updateChannelTypeIcon();
+        if(channel) {
+            channel.reorderClients();
+            channel.updateChannelTypeIcon();
+            this.client.side_bar.info_frame().update_channel_client_count(channel);
         }
         client.updateClientStatusIcons();
         client.update_family_index();
@@ -401,7 +461,6 @@ class ChannelTree {
     }
 
     onSelect(entry?: ChannelEntry | ClientEntry | ServerEntry, enforce_single?: boolean, flag_shift?: boolean) {
-        console.log("Select: " + entry);
         if(this.currently_selected && (ppt.key_pressed(ppt.SpecialKey.SHIFT) || flag_shift) && entry instanceof ClientEntry) { //Currently we're only supporting client multiselects :D
             if(!entry) return; //Nowhere
 
@@ -449,7 +508,17 @@ class ChannelTree {
         else if(entry instanceof ServerEntry)
             (entry as ServerEntry).htmlTag.addClass("selected");
 
-        this.client.select_info.setCurrentSelected($.isArray(this.currently_selected) ? undefined : entry);
+        if(!$.isArray(this.currently_selected)) {
+            if(this.currently_selected instanceof ClientEntry && settings.static_global(Settings.KEY_SWITCH_INSTANT_CLIENT)) {
+                this.client.side_bar.show_client_info(this.currently_selected);
+            } else if(this.currently_selected instanceof ChannelEntry && settings.static_global(Settings.KEY_SWITCH_INSTANT_CHAT)) {
+                this.client.side_bar.channel_conversations().set_current_channel(this.currently_selected.channelId);
+                this.client.side_bar.show_channel_conversations();
+            } else if(this.currently_selected instanceof ServerEntry && settings.static_global(Settings.KEY_SWITCH_INSTANT_CHAT)) {
+                this.client.side_bar.channel_conversations().set_current_channel(0);
+                this.client.side_bar.show_channel_conversations();
+            }
+        }
     }
 
     private callback_multiselect_channel(event) {
@@ -461,12 +530,11 @@ class ChannelTree {
         const music_only = clients.map(e => e instanceof MusicClientEntry ? 0 : 1).reduce((a, b) => a + b, 0) == 0;
         const music_entry = clients.map(e => e instanceof MusicClientEntry ? 1 : 0).reduce((a, b) => a + b, 0) > 0;
         const local_client = clients.map(e => e instanceof LocalClientEntry ? 1 : 0).reduce((a, b) => a + b, 0) > 0;
-        console.log(tr("Music only: %o | Container music: %o | Container local: %o"), music_entry, music_entry, local_client);
-        let entries: ContextMenuEntry[] = [];
+        let entries: contextmenu.MenuEntry[] = [];
         if (!music_entry && !local_client) { //Music bots or local client cant be poked
             entries.push({
-                type: MenuEntryType.ENTRY,
-                icon: "client-poke",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-poke",
                 name: tr("Poke clients"),
                 callback: () => {
                     createInputModal(tr("Poke clients"), tr("Poke message:<br>"), text => true, result => {
@@ -483,8 +551,8 @@ class ChannelTree {
             });
         }
         entries.push({
-            type: MenuEntryType.ENTRY,
-            icon: "client-move_client_to_own_channel",
+            type: contextmenu.MenuEntryType.ENTRY,
+            icon_class: "client-move_client_to_own_channel",
             name: tr("Move clients to your channel"),
             callback: () => {
                 const target = this.client.getClient().currentChannel().getChannelId();
@@ -496,10 +564,10 @@ class ChannelTree {
             }
         });
         if (!local_client) {//local client cant be kicked and/or banned or kicked
-            entries.push(MenuEntry.HR());
+            entries.push(contextmenu.Entry.HR());
             entries.push({
-                type: MenuEntryType.ENTRY,
-                icon: "client-kick_channel",
+                type: contextmenu.MenuEntryType.ENTRY,
+                icon_class: "client-kick_channel",
                 name: tr("Kick clients from channel"),
                 callback: () => {
                     createInputModal(tr("Kick clients from channel"), tr("Kick reason:<br>"), text => true, result => {
@@ -518,8 +586,8 @@ class ChannelTree {
 
             if (!music_entry) { //Music bots  cant be banned or kicked
                 entries.push({
-                    type: MenuEntryType.ENTRY,
-                    icon: "client-kick_server",
+                    type: contextmenu.MenuEntryType.ENTRY,
+                    icon_class: "client-kick_server",
                     name: tr("Kick clients fom server"),
                     callback: () => {
                         createInputModal(tr("Kick clients from server"), tr("Kick reason:<br>"), text => true, result => {
@@ -535,12 +603,17 @@ class ChannelTree {
                         }, {width: 400, maxLength: 255}).open();
                     }
                 }, {
-                    type: MenuEntryType.ENTRY,
-                    icon: "client-ban_client",
+                    type: contextmenu.MenuEntryType.ENTRY,
+                    icon_class: "client-ban_client",
                     name: tr("Ban clients"),
                     invalidPermission: !this.client.permissions.neededPermission(PermissionType.I_CLIENT_BAN_MAX_BANTIME).granted(1),
                     callback: () => {
-                        Modals.spawnBanClient((clients).map(entry => entry.clientNickName()), (data) => {
+                        Modals.spawnBanClient(this.client, (clients).map(entry => {
+                            return {
+                                name: entry.clientNickName(),
+                                unique_id: entry.properties.client_unique_identifier
+                            }
+                        }), (data) => {
                             for (const client of clients)
                                 this.client.serverConnection.send_command("banclient", {
                                     uid: client.properties.client_unique_identifier,
@@ -556,10 +629,10 @@ class ChannelTree {
                 });
             }
             if(music_only) {
-                entries.push(MenuEntry.HR());
+                entries.push(contextmenu.Entry.HR());
                 entries.push({
                     name: tr("Delete bots"),
-                    icon: "client-delete",
+                    icon_class: "client-delete",
                     disabled: false,
                     callback: () => {
                         const param_string = clients.map((_, index) => "{" + index + "}").join(', ');
@@ -575,11 +648,11 @@ class ChannelTree {
                             }
                         });
                     },
-                    type: MenuEntryType.ENTRY
+                    type: contextmenu.MenuEntryType.ENTRY
                 });
             }
         }
-        spawn_context_menu(event.pageX, event.pageY, ...entries);
+        contextmenu.spawn_context_menu(event.pageX, event.pageY, ...entries);
     }
 
     clientsByGroup(group: Group) : ClientEntry[] {
@@ -605,10 +678,21 @@ class ChannelTree {
     }
 
     reset(){
-        this.server = null;
+        const voice_connection = this.client.serverConnection ? this.client.serverConnection.voice_connection() : undefined;
+        for(const client of this.clients) {
+            if(client.get_audio_handle() && voice_connection) {
+                voice_connection.unregister_client(client.get_audio_handle());
+                client.set_audio_handle(undefined);
+            }
+            client.destroy();
+        }
         this.clients = [];
+
+        for(const channel of this.channels)
+            channel.destroy();
         this.channels = [];
-        this._tag_entries.children().detach(); //Do not remove the listener!
+
+        this._tag_entries.children().detach(); //Dont remove listeners
 
         this.channel_first = undefined;
         this.channel_last = undefined;
@@ -644,7 +728,11 @@ class ChannelTree {
 
                 return new Promise<ChannelEntry>(resolve => { resolve(channel); })
             }).then(channel => {
-                this.client.chat.serverChat().appendMessage(tr("Channel {} successfully created!"), true, channel.generate_tag(true));
+                this.client.log.log(log.server.Type.CHANNEL_CREATE, {
+                    channel: channel.log_data(),
+                    creator: this.client.getClient().log_data(),
+                    own_action: true
+                });
                 this.client.sound.play(Sound.CHANNEL_CREATED);
             });
         });
@@ -689,9 +777,10 @@ class ChannelTree {
     }
 
     handle_key_press(event: KeyboardEvent) {
-        if(!this.selected_event || !this.currently_selected || $.isArray(this.currently_selected)) return;
+        //console.log("Keydown: %o | %o | %o", this._focused, this.currently_selected, Array.isArray(this.currently_selected));
+        if(!this._focused || !this.currently_selected || Array.isArray(this.currently_selected)) return;
 
-        if(event.keyCode == JQuery.Key.ArrowUp) {
+        if(event.keyCode == KeyCode.KEY_UP) {
             event.preventDefault();
             if(this.currently_selected instanceof ChannelEntry) {
                 let previous = this.currently_selected.channel_previous;
@@ -735,7 +824,7 @@ class ChannelTree {
                 return;
             }
 
-        } else if(event.keyCode == JQuery.Key.ArrowDown) {
+        } else if(event.keyCode == KeyCode.KEY_DOWN) {
             event.preventDefault();
             if(this.currently_selected instanceof ChannelEntry) {
                 this.select_next_channel(this.currently_selected, true);
@@ -751,7 +840,7 @@ class ChannelTree {
                 this.select_next_channel(channel, false);
             } else if(this.currently_selected instanceof ServerEntry)
                 this.onSelect(this.channel_first, true);
-        } else if(event.keyCode == JQuery.Key.Enter) {
+        } else if(event.keyCode == KeyCode.KEY_RETURN) {
             if(this.currently_selected instanceof ChannelEntry) {
                 this.currently_selected.joinChannel();
             }

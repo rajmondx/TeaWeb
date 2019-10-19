@@ -5,6 +5,12 @@ enum Sound {
     AWAY_ACTIVATED = "away_activated",
     AWAY_DEACTIVATED = "away_deactivated",
 
+    MICROPHONE_MUTED = "microphone.muted",
+    MICROPHONE_ACTIVATED = "microphone.activated",
+
+    SOUND_MUTED = "sound.muted",
+    SOUND_ACTIVATED = "sound.activated",
+
     CONNECTION_CONNECTED = "connection.connected",
     CONNECTION_DISCONNECTED = "connection.disconnected",
     CONNECTION_BANNED = "connection.banned",
@@ -40,6 +46,7 @@ enum Sound {
     USER_LEFT_KICKED_SERVER = "user.left.kicked.channel", //User is your channel was kicked from the server
     USER_LEFT_DISCONNECT = "user.left.disconnect",
     USER_LEFT_BANNED  = "user.left.banned",
+    USER_LEFT_TIMEOUT = "user.left.timeout",
 
     ERROR_INSUFFICIENT_PERMISSIONS = "error.insufficient_permissions",
 
@@ -106,10 +113,12 @@ namespace sound {
     export function set_master_volume(volume: number) {
         volume_require_save = volume_require_save || master_volume != volume;
         master_volume = volume;
-        if(master_mixed.gain.setValueAtTime)
-            master_mixed.gain.setValueAtTime(volume, 0);
-        else
-            master_mixed.gain.value = volume;
+        if(master_mixed) {
+            if(master_mixed.gain.setValueAtTime)
+                master_mixed.gain.setValueAtTime(volume, 0);
+            else
+                master_mixed.gain.value = volume;
+        }
     }
 
     export function overlap_activated() : boolean {
@@ -152,23 +161,22 @@ namespace sound {
             const data: any = {};
             data.version = 1;
 
-            for(const sound in Sound) {
-                if(typeof(speech_volume[sound]) !== "undefined")
-                    data[sound] = speech_volume[sound];
+            for(const key in Sound) {
+                if(typeof(speech_volume[Sound[key]]) !== "undefined")
+                    data[Sound[key]] = speech_volume[Sound[key]];
             }
             data.master = master_volume;
             data.overlap = overlap_sounds;
             data.ignore_muted = ignore_muted;
 
             settings.changeGlobal("sound_volume", JSON.stringify(data));
-            console.error(data);
         }
     }
 
     export function initialize() : Promise<void> {
         $.ajaxSetup({
             beforeSend: function(jqXHR,settings){
-                if (settings.dataType === 'binary'){
+                if (settings.dataType === 'binary') {
                     settings.xhr().responseType = 'arraybuffer';
                     settings.processData = false;
                 }
@@ -178,12 +186,11 @@ namespace sound {
         /* volumes */
         {
             const data = JSON.parse(settings.static_global("sound_volume", "{}"));
-            for(const sound in Sound) {
-                if(typeof(data[sound]) !== "undefined")
-                    speech_volume[sound] = data[sound];
+            for(const sound_key in Sound) {
+                if(typeof(data[Sound[sound_key]]) !== "undefined")
+                    speech_volume[Sound[sound_key]] = data[Sound[sound_key]];
             }
 
-            console.error(data);
             master_volume = data.master || 1;
             overlap_sounds = data.overlap || true;
             ignore_muted = data.ignore_muted || true;
@@ -194,7 +201,7 @@ namespace sound {
 
         manager = new SoundManager(undefined);
         audio.player.on_ready(reinitialisize_audio);
-        return new Promise<void>(resolve => {
+        return new Promise<void>((resolve, reject) => {
             $.ajax({
                 url: "audio/speech/mapping.json",
                 success: response => {
@@ -204,9 +211,9 @@ namespace sound {
                         register_sound(entry.key, "speech/" + entry.file);
                     resolve();
                 },
-                error: () => {
-                    console.log("error!");
-                    console.dir(...arguments);
+                error: error => {
+                    log.error(LogCategory.AUDIO, "error: %o", error);
+                    reject();
                 },
                 timeout: 5000,
                 async: true,
@@ -220,6 +227,8 @@ namespace sound {
         ignore_overlap?: boolean;
 
         default_volume?: number;
+
+        callback?: (flag: boolean) => any;
     }
 
     export async function resolve_sound(sound: Sound) : Promise<SoundHandle> {
@@ -245,19 +254,17 @@ namespace sound {
         if(context.decodeAudioData) {
             if(!file.cached) {
                 const decode_data = buffer => {
-                    console.log(buffer);
                     try {
-                        console.log(tr("Decoding data"));
+                        log.info(LogCategory.AUDIO, tr("Decoding data"));
                         context.decodeAudioData(buffer, result => {
                             file.cached = result;
                         }, error => {
-                            console.error(tr("Failed to decode audio data for %o"), sound);
-                            console.error(error);
+                            log.error(LogCategory.AUDIO, tr("Failed to decode audio data for %o: %o"), sound, error);
                             file.not_supported = true;
                             file.not_supported_timeout = Date.now() + 1000 * 60 * 2; //Try in 2min again!
                         })
                     } catch (error) {
-                        console.error(error);
+                        log.error(LogCategory.AUDIO, error);
                         file.not_supported = true;
                         file.not_supported_timeout = Date.now() + 1000 * 60 * 2; //Try in 2min again!
                     }
@@ -279,15 +286,15 @@ namespace sound {
                     if (xhr.status != 200)
                         throw "invalid response code (" + xhr.status + ")";
 
-                    console.log(tr("Decoding data"));
+                    log.debug(LogCategory.AUDIO, tr("Decoding data"));
                     try {
                         file.cached = await context.decodeAudioData(xhr.response);
                     } catch(error) {
-                        console.error(error);
+                        log.error(LogCategory.AUDIO, error);
                         throw "failed to decode audio data";
                     }
                 } catch(error) {
-                    console.error(tr("Failed to load audio file %s. Error: %o"), sound, error);
+                    log.error(LogCategory.AUDIO, tr("Failed to load audio file %s. Error: %o"), sound, error);
                     file.not_supported = true;
                     file.not_supported_timeout = Date.now() + 1000 * 60 * 2; //Try in 2min again!
                 }
@@ -296,7 +303,7 @@ namespace sound {
             if(!file.node) {
                 if(!warned) {
                     warned = true;
-                    console.warn(tr("Your browser does not support decodeAudioData! Using a node to playback! This bypasses the audio output and volume regulation!"));
+                    log.warn(LogCategory.AUDIO, tr("Your browser does not support decodeAudioData! Using a node to playback! This bypasses the audio output and volume regulation!"));
                 }
                 const container = $("#sounds");
                 const node = $.spawn("audio").attr("src", path);
@@ -323,7 +330,7 @@ namespace sound {
             options = options || {};
 
             const volume = get_sound_volume(_sound, options.default_volume);
-            console.log(tr("Replaying sound %s (Sound volume: %o | Master volume %o)"), _sound, volume, master_volume);
+            log.info(LogCategory.AUDIO, tr("Replaying sound %s (Sound volume: %o | Master volume %o)"), _sound, volume, master_volume);
 
             if(volume == 0 || master_volume == 0)
                 return;
@@ -333,7 +340,7 @@ namespace sound {
 
             const context = audio.player.context();
             if(!context) {
-                console.warn(tr("Tried to replay a sound without an audio context (Sound: %o). Dropping playback"), _sound);
+                log.warn(LogCategory.AUDIO, tr("Tried to replay a sound without an audio context (Sound: %o). Dropping playback"), _sound);
                 return;
             }
 
@@ -342,7 +349,7 @@ namespace sound {
                     return;
 
                 if(!options.ignore_overlap && (this._playing_sounds[_sound] > 0) && !sound.overlap_activated()) {
-                    console.log(tr("Dropping requested playback for sound %s because it would overlap."), _sound);
+                    log.info(LogCategory.AUDIO, tr("Dropping requested playback for sound %s because it would overlap."), _sound);
                     return;
                 }
 
@@ -355,6 +362,8 @@ namespace sound {
 
                     handle.replaying = true;
                     player.onended = event => {
+                        if(options.callback)
+                            options.callback(true);
                         delete this._playing_sounds[_sound];
                     };
 
@@ -372,11 +381,24 @@ namespace sound {
                     }
                 } else if(handle.node) {
                     handle.node.currentTime = 0;
-                    handle.node.play();
+                    handle.node.play().then(() => {
+                        if(options.callback)
+                            options.callback(true);
+                    }).catch(error => {
+                        log.warn(LogCategory.AUDIO, tr("Sound playback for sound %o resulted in an error: %o"), sound, error);
+                        if(options.callback)
+                            options.callback(false);
+                    });
                 } else {
-                    console.warn(tr("Failed to replay sound because of missing handles."), sound);
+                    log.warn(LogCategory.AUDIO, tr("Failed to replay sound %o because of missing handles."), sound);
+                    if(options.callback)
+                        options.callback(false);
                     return;
                 }
+            }).catch(error => {
+                log.warn(LogCategory.AUDIO, tr("Failed to replay sound %o because it could not be resolved: %o"), sound, error);
+                if(options.callback)
+                    options.callback(false);
             });
         }
     }

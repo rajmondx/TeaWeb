@@ -47,7 +47,9 @@ namespace profiles.identities {
 
         set_name(name: string) { this._name = name; }
 
-        name(): string {
+        name() : string { return this._name; }
+
+        fallback_name(): string | undefined {
             return this._name;
         }
 
@@ -60,7 +62,7 @@ namespace profiles.identities {
         }
 
         valid(): boolean {
-            return this._name != undefined && this._name.length >= 3;
+            return this._name != undefined && this._name.length >= 5;
         }
 
         decode(data) : Promise<void> {
