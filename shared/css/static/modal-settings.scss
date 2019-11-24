@@ -109,7 +109,92 @@
 
 				@include chat-scrollbar-horizontal();
 
-				&.general-chat, &.general-application, &.audio-sounds {
+				&.url-preview {
+					.url-list {
+						border-radius: .2em .2em 0 0;
+						border: 1px solid #1f2122;
+						border-bottom: 0;
+
+						padding: 0!important;
+						background-color: #28292b;
+
+						flex-grow: 1;
+						flex-shrink: 1;
+						overflow-y: auto;
+
+						min-height: 4em;
+						position: relative;
+
+						margin-bottom: 2em;
+
+						@include chat-scrollbar-vertical();
+
+						.entries {
+							flex-grow: 1;
+							flex-shrink: 1;
+
+							min-height: 4em;
+
+							.entry {
+								display: flex;
+								flex-direction: row;
+								justify-content: stretch;
+
+								height: 1.6em;
+								padding-left: .5em;
+								padding-right: .5em;
+
+								&:hover {
+									background-color: #232425;
+								}
+
+								> * {
+									align-self: center;
+								}
+
+								.icon-container {
+									margin-right: .25em;
+								}
+
+								.name {
+									flex-grow: 1;
+									flex-shrink: 1;
+
+									min-width: 1em;
+									line-height: normal;
+
+									overflow: hidden;
+									white-space: nowrap;
+									text-overflow: ellipsis;
+								}
+
+								.button-delete {
+									height: 1.3em;
+									width: 1.3em;
+
+									cursor: pointer;
+									border-radius: .2em;
+
+									&:hover {
+										background-color: #2c2d2e;
+									}
+
+									display: flex;
+									flex-direction: row;
+									justify-content: space-around;
+
+									> div {
+										align-self: center;
+									}
+
+									@include transition($button_hover_animation_time ease-in-out);
+								}
+							}
+						}
+					}
+				}
+
+				&.general-chat, &.general-application, &.audio-sounds, &.url-preview {
 					label {
 						display: flex;
 						flex-direction: row;

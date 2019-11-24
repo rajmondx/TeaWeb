@@ -1898,6 +1898,9 @@
                     <div class="entry group">{{tr "Identity" /}}</div>
                     <div class="entry" container="identity-profiles">{{tr "Profiles" /}}</div>
                     <div class="entry" container="identity-forum">{{tr "TeaForo connection" /}}</div>
+
+                    <div class="entry group">{{tr "Web Interaction" /}}</div>
+                    <div class="entry" container="url-preview">{{tr "URL Preview" /}}</div>
                 </div>
                 <div class="container-seperator vertical" seperator-id="seperator-settings"></div>
                 <div class="right">
@@ -2327,6 +2330,43 @@
                                             <div class="g-recaptcha"></div>
                                             <button class="btn btn-success button-login">{{tr "Login" /}}</button>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="container url-preview">
+                        <label>
+                            <div class="checkbox">
+                                <input type="checkbox" class="option-url-preview">
+                                <div class="mark"></div>
+                            </div>
+                            <a>{{tr 'Show in chats a preview of URL' /}}</a>
+                        </label>
+
+
+                        <div class="form-group">
+                            <label class="bmd-label-floating">Add a new whitelisted URL</label>
+                            <input class="form-control input-add-whitelisted-url" type="text">
+                            <small>E.g. "*.google.*" or "google.de, google.us, google.com"
+                        </div>
+
+                        <h3>{{tr "Whitelisted URLs" /}}</h3>
+                        <a>{{tr "Show a preview only from those URLs" /}}</a>
+
+                        <div class="url-list">
+                            <div class="entries">
+                                <div class="entry">
+                                    <a class="name">google.*</a>
+                                    <div class="button-delete">
+                                        <div class="icon_em client-delete" title="Remove URL Preview"></div>
+                                    </div>
+                                </div>
+                                <div class="entry">
+                                    <a class="name">amazon.de, amazon.com</a>
+                                    <div class="button-delete">
+                                        <div class="icon_em client-delete" title="Remove URL Preview"></div>
                                     </div>
                                 </div>
                             </div>
